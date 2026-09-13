@@ -1,0 +1,38 @@
+services:
+  oddium:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Paris
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      PROPLINE_API_KEY: ${PROPLINE_API_KEY}
+      GUILD_ID: ${GUILD_ID:-}
+      DB_PATH: /app/data/oddium.db
+      BACKUP_DIR: /app/data/backups
+      LOG_DIR: /app/logs
+      API_CACHE_DIR: /app/data/api_cache_propline
+      LIVE_WS_HOST: 127.0.0.1
+      LIVE_WS_PORT: 8765
+      LIVE_WS_PATH: /live
+      LIVE_POLL_SECONDS: ${LIVE_POLL_SECONDS:-5}
+      LIVE_DISCOVERY_SECONDS: ${LIVE_DISCOVERY_SECONDS:-60}
+      LIVE_FINISHED_DISPLAY_MINUTES: ${LIVE_FINISHED_DISPLAY_MINUTES:-5}
+    volumes:
+      - oddium-data:/app/data
+      - oddium-logs:/app/logs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+volumes:
+  oddium-data:
+  oddium-logs:
