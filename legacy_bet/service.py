@@ -623,7 +623,11 @@ class BettingService:
                         new_phase = old_phase
                         status = old_phase
                     old_clock = str(old["live_clock"] or "")
-                    new_clock = str(event.get("live_clock") or "")
+                    new_clock = str(event.get("live_clock") or "").strip()
+                    # A stopped phase must not inherit a stale running timer.
+                    # This fixes cases such as "MI-TEMPS · 81'".
+                    if new_phase in {"halftime", "finished", "postponed", "cancelled", "suspended", "penalties", "kickoff_wait"}:
+                        new_clock = ""
                     old_detail = str(old["live_detail"] or "")
                     new_detail = str(event.get("status_detail") or "")
                     score_changed = (hs_i is not None and old["home_score"] != hs_i) or (aws_i is not None and old["away_score"] != aws_i)

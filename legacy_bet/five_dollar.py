@@ -272,10 +272,8 @@ class FiveDollarClient:
         code = str(item.get("status_code") or "").strip().lower()
         if isinstance(raw_obj, dict):
             code = str(raw_obj.get("code") or code).strip().lower()
-        if code in {"half", "ht"}:
-            return "MT"
-        if code in {"full", "ft"}:
-            return "FT"
+        if code in {"half", "ht", "full", "ft"}:
+            return ""
         minute = cls._minute(item)
         return f"{minute}'" if minute is not None else ""
 

@@ -82,26 +82,46 @@ class PanelManager:
 
     @staticmethod
     def _display_clock(row, phase: str) -> str:
-        """Provider clock first; kickoff-based estimate only when a live provider omits it."""
-        clock = str(row["live_clock"] or "").strip()
-        if clock:
-            return clock
-        if phase not in {"live", "first_half", "second_half"}:
+        """Return only a trustworthy, phase-compatible provider clock.
+
+        V13.4 deliberately removes kickoff-based timer estimation: pauses, late
+        kickoffs and provider delays made those estimates drift badly. A clock is
+        shown only when a provider supplied a plausible football minute.
+        """
+        phase = str(phase or "").strip().lower()
+        # Never display a minute during a stopped/terminal phase.
+        if phase in {"halftime", "half_time", "ht", "finished", "ft", "postponed", "cancelled", "suspended", "kickoff_wait"}:
+            return ""
+
+        raw = str(row["live_clock"] or "").strip()
+        if not raw:
+            return ""
+        token = raw.upper().replace(" ", "")
+        if token in {"HT", "MT", "HALF", "HALFTIME", "FT", "FULL", "FULLTIME"}:
+            return ""
+
+        # Keep only provider clocks containing a real minute.
+        base = token.split("+", 1)[0]
+        digits = "".join(ch for ch in base if ch.isdigit())
+        if not digits:
             return ""
         try:
-            kickoff = datetime.fromisoformat(str(row["commence_time"]).replace("Z", "+00:00"))
-            if kickoff.tzinfo is None:
-                kickoff = kickoff.replace(tzinfo=timezone.utc)
-            elapsed = max(0, int((datetime.now(timezone.utc) - kickoff.astimezone(timezone.utc)).total_seconds() // 60))
-        except Exception:
+            minute = int(digits)
+        except ValueError:
             return ""
-        # A missing provider timer must never fabricate an impossible football minute.
-        if phase in {"live", "first_half"}:
-            minute = min(elapsed, 45)
-        else:
-            # Approximate a 15-minute half-time when the provider confirms 2H but omits elapsed.
-            minute = min(90, max(46, elapsed - 15))
-        return f"~{minute}'" if minute > 0 else ""
+
+        # Reject clocks that contradict the phase.
+        if phase == "first_half" and not (0 <= minute <= 45):
+            return ""
+        if phase == "second_half" and not (46 <= minute <= 90):
+            return ""
+        if phase == "extra_time" and not (91 <= minute <= 120):
+            return ""
+        if phase == "penalties":
+            return ""
+        if phase == "live" and not (0 <= minute <= 120):
+            return ""
+        return raw
 
     async def build_live_embed(self) -> discord.Embed:
         """V13 premium live board: one compact card, no provider/debug noise."""
