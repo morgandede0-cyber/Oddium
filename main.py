@@ -131,8 +131,7 @@ async def setup(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Utilise cette commande dans un salon texte.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    if SETTINGS.odds_api_key:
-        await service.refresh_odds()
+    await service.refresh_odds()
     msg = await panel.ensure_panel(interaction.channel)
     await db.log_admin(interaction.user.id, "SETUP_PANEL", f"channel={interaction.channel.id} message={msg.id}")
     await interaction.followup.send(
@@ -173,17 +172,41 @@ async def admin_paris(interaction: discord.Interaction):
         color=discord.Color.dark_gold(),
     )
     embed.add_field(name="État", value="🔒 Suspendu" if paused else "🟢 Ouvert", inline=True)
-    embed.add_field(name="Cotes", value="Oddium V8 • cotes bookmaker réelles via PropLine", inline=True)
+    embed.add_field(name="Cotes", value="Oddium Fusion • cotes calculées automatiquement", inline=True)
     embed.add_field(name="Mises", value=f"{SETTINGS.min_stake} → {SETTINGS.max_stake} {SETTINGS.currency_name}", inline=True)
     embed.add_field(name="Matchs futurs", value=str(status["future_matches"]), inline=True)
     embed.add_field(name="Paris actifs", value=str(status["pending_bets"]), inline=True)
-    embed.add_field(name="Quota API", value=str(status["remaining"]), inline=True)
+    embed.add_field(name="Moteur", value="🟢 Free-first", inline=True)
     await interaction.response.send_message(embed=embed, view=AdminPanelView(service, active), ephemeral=True)
+
+
+@bot.tree.command(name="diagnostic_oddium", description="Affiche la santé des sources et du moteur Oddium")
+@app_commands.checks.has_permissions(administrator=True)
+async def diagnostic_oddium(interaction: discord.Interaction):
+    status = await service.api_status()
+    live_count = int(await db.get_setting("live_engine_visible_count") or 0)
+    last_scan = await db.get_setting("live_engine_last_scan")
+    embed = discord.Embed(
+        title="🩺 Diagnostic Oddium V10",
+        description="Architecture free-first • fixtures football-data.org • live multi-source • cotes Oddium Fusion",
+        color=discord.Color.green() if not status.get("last_error") else discord.Color.orange(),
+    )
+    embed.add_field(name="Live", value=f"Matchs visibles : **{live_count}**\nDernier scan : `{last_scan or '—'}`", inline=False)
+    lines = []
+    for d in status.get("diagnostics", []):
+        lines.append(
+            f"**{d['name']}** • fixtures `{d['events']}` • cotes `{d['parsed']}` • live `{d.get('live_rows', 0)}`\n"
+            f"↳ {d.get('live_source', '—')}"
+        )
+    embed.add_field(name="Compétitions", value=("\n".join(lines) or "Aucune donnée")[:1024], inline=False)
+    embed.add_field(name="Dernière erreur", value=(status.get("last_error") or "Aucune")[:1024], inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @setup.error
 @setup_live.error
 @admin_paris.error
+@diagnostic_oddium.error
 async def admin_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         msg = "❌ Réservé aux administrateurs."
@@ -231,7 +254,7 @@ async def live_collector_supervisor():
     can no longer stop the collector. Public-source caches in OddsAPI bound network use.
     """
     await bot.wait_until_ready()
-    log.info("Oddium Live Engine V9.1 démarré • scan autonome des 6 compétitions")
+    log.info("Oddium Live Engine V10 démarré • scan autonome des 6 compétitions")
     previous_signature = None
     failures = 0
     while not bot.is_closed():

@@ -12,7 +12,8 @@ Cette version est préparée pour Coolify. Le bot Discord n'a pas besoin d'un do
 6. Dans **Environment Variables**, ajoute au minimum :
 
    - `DISCORD_TOKEN` = token Discord du bot
-   - `PROPLINE_API_KEY` = clé PropLine
+   - `FOOTBALL_DATA_API_KEY` = clé gratuite football-data.org
+   - `PROPLINE_API_KEY` = optionnel (compatibilité seulement)
    - `GUILD_ID` = ID du serveur Discord si tu l'utilises déjà
 
 7. Dans **Persistent Storage**, crée :
@@ -34,7 +35,8 @@ Dans Coolify, définis les variables :
 
 ```env
 DISCORD_TOKEN=...
-PROPLINE_API_KEY=...
+FOOTBALL_DATA_API_KEY=...
+PROPLINE_API_KEY=
 GUILD_ID=...
 ```
 

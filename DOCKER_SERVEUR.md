@@ -1,6 +1,6 @@
 # Oddium V9.1.2 — Installation Docker serveur
 
-Cette version conserve les données SQLite, les sauvegardes, le cache PropLine et les logs hors du conteneur.
+Cette version conserve les données SQLite, les sauvegardes, le cache des données football et les logs hors du conteneur.
 Le redémarrage ou la reconstruction de l'image Docker ne supprime donc pas les paris.
 
 ## 1. Prérequis serveur
@@ -41,7 +41,8 @@ Renseigne au minimum :
 
 ```env
 DISCORD_TOKEN=TON_TOKEN_DISCORD
-PROPLINE_API_KEY=TA_CLE_PROPLINE
+FOOTBALL_DATA_API_KEY=TA_CLE_FOOTBALL_DATA
+# Optionnel : PROPLINE_API_KEY=
 GUILD_ID=ID_DE_TON_SERVEUR_DISCORD
 ```
 

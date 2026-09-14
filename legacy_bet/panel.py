@@ -80,7 +80,7 @@ class PanelManager:
         rows = await self.service.live_matches(25)
         embed = discord.Embed(
             title="🔴 MATCHS EN DIRECT",
-            description="⚡ **Oddium Live** — panneau piloté par notre WebSocket local. Sources gratuites : livescoreFootball + ESPN + Sofascore. Cotes : PropLine.",
+            description="⚡ **Oddium Live** — panneau piloté par notre WebSocket local. Sources gratuites redondantes : ESPN + Sofascore + FotMob + TheSportsDB. Cotes : Oddium Fusion.",
             color=discord.Color.red(),
         )
         if not rows:
@@ -97,6 +97,7 @@ class PanelManager:
                 phase = str(m["live_phase"] or m["match_status"] or "live").lower()
                 clock = str(m["live_clock"] or "").strip()
                 labels = {
+                    "kickoff_wait": "🔴 COUP D’ENVOI • confirmation live…",
                     "first_half": "🔴 1RE MI-TEMPS", "live": "🔴 EN DIRECT",
                     "halftime": "⏸️ MI-TEMPS", "second_half": "🔴 2E MI-TEMPS",
                     "extra_time": "⏱️ PROLONGATIONS", "penalties": "🎯 TIRS AU BUT",

@@ -18,6 +18,8 @@ LEAGUE_CODES = {
     "soccer_epl": {"E0"},
     "soccer_spain_la_liga": {"SP1"},
     "soccer_france_ligue_one": {"F1"},
+    "soccer_germany_bundesliga": {"D1"},
+    "soccer_italy_serie_a": {"I1"},
 }
 
 

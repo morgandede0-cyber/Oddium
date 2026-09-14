@@ -9,6 +9,7 @@ from .constants import COMPETITIONS
 from .database import Database, utcnow_iso
 from .economy import EconomyAdapter
 from .odds_api import OddsAPI
+from .oddium_odds import OddiumOddsEngine
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
@@ -22,6 +23,7 @@ class BettingService:
         self.db = db
         self.economy = economy
         self.odds_api = odds_api
+        self.odds_engine = OddiumOddsEngine(odds_api, margin=SETTINGS.oddium_odds_margin_percent / 100.0)
         self.last_odds_refresh: datetime | None = None
         self.last_scores_refresh: datetime | None = None
         self.last_error: str | None = None
@@ -77,10 +79,12 @@ class BettingService:
         return discovered, settlements, errors
 
     async def refresh_odds(self, *, priority: bool = False, discover: bool = True) -> tuple[int, list[str]]:
-        """Cache real PropLine h2h prices with one bulk request per competition.
+        """Generate Oddium 1/X/2 prices without a paid odds API.
 
-        There is deliberately no per-match API call: a whole league board is fetched at
-        once then persisted in SQLite. Button clicks and bet confirmation only read SQLite.
+        Fixtures are canonical football-data.org rows.  Prices are produced by the
+        Oddium Fusion engine: public football-data.co.uk consensus when available,
+        blended with a standings/Poisson model.  This deliberately avoids creating a
+        second PropLine event id for the same fixture.
         """
         errors: list[str] = []
         if discover:
@@ -89,70 +93,50 @@ class BettingService:
 
         active = await self.active_competitions()
         updated = 0
+        now = datetime.now(timezone.utc)
+        horizon = now + timedelta(hours=SETTINGS.odds_horizon_hours)
         seen_now = utcnow_iso()
-        horizon = datetime.now(timezone.utc) + timedelta(hours=SETTINGS.odds_horizon_hours)
 
         for key in active:
             try:
-                board = await self.odds_api.fetch_bulk_odds(key, force=False)
+                rows = await self.db.fetchall(
+                    """SELECT * FROM matches
+                       WHERE sport_key=? AND completed=0 AND cancelled=0
+                         AND commence_time>=? AND commence_time<=?
+                       ORDER BY commence_time ASC""",
+                    (key, now.isoformat(), horizon.isoformat()),
+                )
                 parsed_count = 0
-                for raw in board or []:
-                    event = self.odds_api.parse_event_shell(raw, key)
-                    if not event:
-                        continue
+                for match in rows:
                     try:
-                        kickoff = parse_iso(event["commence_time"])
-                    except Exception:
-                        continue
-                    if kickoff > horizon:
+                        quote = await self.odds_engine.quote(key, str(match["home_team"]), str(match["away_team"]))
+                    except Exception as exc:
+                        errors.append(f"{match['home_team']} - {match['away_team']}: {exc}")
                         continue
 
-                    # Bulk odds already carries event identity; this upsert also catches
-                    # newly merged/canonical PropLine event ids without a second request.
-                    await self.db.execute(
-                        """INSERT INTO matches(event_id,sport_key,competition_name,home_team,away_team,home_team_id,away_team_id,commence_time,
-                              odds_available,completed,cancelled,first_seen_at,last_seen_at)
-                           VALUES(?,?,?,?,?,?,?,?,0,0,0,?,?)
-                           ON CONFLICT(event_id) DO UPDATE SET
-                              sport_key=excluded.sport_key, competition_name=excluded.competition_name,
-                              home_team=excluded.home_team, away_team=excluded.away_team,
-                              home_team_id=COALESCE(excluded.home_team_id,matches.home_team_id),
-                              away_team_id=COALESCE(excluded.away_team_id,matches.away_team_id),
-                              commence_time=excluded.commence_time,last_seen_at=excluded.last_seen_at""",
-                        (event["event_id"], key, event["competition_name"], event["home_team"], event["away_team"],
-                         event.get("home_team_id"), event.get("away_team_id"), event["commence_time"], seen_now, seen_now),
-                    )
-
-                    calc = self.odds_api.pick_1x2(raw)
-                    if not calc:
-                        continue
-                    event_id = event["event_id"]
-                    old = await self.db.fetchone(
-                        "SELECT home_odd,draw_odd,away_odd FROM matches WHERE event_id=?", (event_id,)
-                    )
+                    old = (match["home_odd"], match["draw_odd"], match["away_odd"])
                     await self.db.execute(
                         """UPDATE matches SET home_odd=?,draw_odd=?,away_odd=?,bookmaker=?,
                            last_odds_update=?,odds_available=1,last_seen_at=? WHERE event_id=?""",
-                        (calc["home_odd"], calc["draw_odd"], calc["away_odd"], calc["bookmaker"],
-                         calc["last_odds_update"], seen_now, event_id),
+                        (quote.home_odd, quote.draw_odd, quote.away_odd, quote.source,
+                         quote.last_odds_update, seen_now, str(match["event_id"])),
                     )
-                    if old is None or old["home_odd"] is None or any(
-                        abs(float(old[k]) - float(calc[k])) > 0.0001
-                        for k in ("home_odd", "draw_odd", "away_odd")
-                    ):
+                    changed = old[0] is None or any(
+                        abs(float(prev) - float(cur)) > 0.0001
+                        for prev, cur in zip(old, (quote.home_odd, quote.draw_odd, quote.away_odd))
+                        if prev is not None
+                    )
+                    if changed:
                         await self.db.execute(
                             "INSERT INTO odds_history(event_id,home_odd,draw_odd,away_odd,bookmaker,captured_at) VALUES(?,?,?,?,?,?)",
-                            (event_id, calc["home_odd"], calc["draw_odd"], calc["away_odd"], calc["bookmaker"], seen_now),
+                            (str(match["event_id"]), quote.home_odd, quote.draw_odd, quote.away_odd, quote.source, seen_now),
                         )
                     parsed_count += 1
                     updated += 1
 
-                await self.db.set_setting(f"diag_odds_{key}", len(board or []))
+                await self.db.set_setting(f"diag_odds_{key}", len(rows))
                 await self.db.set_setting(f"diag_parsed_{key}", parsed_count)
-                if board and parsed_count == 0:
-                    errors.append(
-                        f"{COMPETITIONS.get(key, {}).get('name', key)}: matchs détectés mais aucune cote 1/N/2 complète disponible"
-                    )
+                await self.db.set_setting(f"diag_odds_source_{key}", "Oddium Fusion")
             except Exception as exc:
                 errors.append(f"{COMPETITIONS.get(key, {}).get('name', key)}: {exc}")
 
@@ -192,6 +176,67 @@ class BettingService:
         self._last_engine_odds_attempt = now
         return await self.refresh_odds(priority=False, discover=discover)
 
+    async def _promote_scheduled_kickoffs(self) -> list[dict]:
+        """Make a fixture visible the instant its scheduled kickoff is reached.
+
+        Public score feeds can confirm IN_PLAY a few minutes late.  Instead of hiding
+        the fixture until the first score/status change, Oddium enters a temporary
+        `kickoff_wait` phase.  A real provider replaces it as soon as it confirms live.
+        """
+        now = datetime.now(timezone.utc)
+        lo = (now - timedelta(minutes=150)).isoformat()
+        hi = now.isoformat()
+        rows = await self.db.fetchall(
+            """SELECT * FROM matches
+               WHERE completed=0 AND cancelled=0
+                 AND commence_time BETWEEN ? AND ?
+                 AND COALESCE(live_phase,'pending')='pending'""",
+            (lo, hi),
+        )
+        out: list[dict] = []
+        for row in rows:
+            event_id = str(row["event_id"])
+            await self.db.execute(
+                """UPDATE matches SET live_phase='kickoff_wait', match_status='kickoff_wait',
+                   live_clock=COALESCE(live_clock,?),
+                   live_detail='Coup d’envoi prévu • confirmation live en attente',
+                   live_source='Horloge Oddium', last_score_update=? WHERE event_id=?""",
+                ("0'", utcnow_iso(), event_id),
+            )
+            out.append({
+                "type": "match_started", "event_id": event_id,
+                "home_team": row["home_team"], "away_team": row["away_team"],
+                "home_score": row["home_score"], "away_score": row["away_score"],
+                "phase": "kickoff_wait", "previous_phase": "pending", "clock": "0'",
+                "detail": "Coup d’envoi prévu • confirmation live en attente",
+                "source": "Horloge Oddium",
+            })
+        return out
+
+    def _sort_live_rows(self, raws: list[dict], sport_key: str) -> list[dict]:
+        """Process weak/pending observations first and authoritative live states last.
+
+        This prevents a slow schedule-only provider from reverting ESPN/Sofascore from
+        LIVE back to PENDING during the same collector cycle.
+        """
+        state_rank = {
+            "pending": 0, "kickoff_wait": 1, "suspended": 2,
+            "live": 4, "first_half": 5, "halftime": 6, "second_half": 7,
+            "extra_time": 8, "penalties": 9,
+            "postponed": 10, "cancelled": 10, "finished": 11,
+        }
+        source_rank = {
+            "thesportsdb": 1, "livescorefootball": 2, "fotmob": 3,
+            "espn": 4, "sofascore": 5, "sofascore live": 6,
+            "football-data.org": 3,
+        }
+        def key(raw: dict):
+            parsed = self.odds_api.parse_score_shell(raw, sport_key) or {}
+            st = str(parsed.get("status") or "pending").lower()
+            src = str(parsed.get("source") or "").lower()
+            return (state_rank.get(st, 1), source_rank.get(src, 0), 1 if parsed.get("live_clock") else 0)
+        return sorted(list(raws or []), key=key)
+
     async def refresh_scores_and_settle(self, *, force_live_panel: bool = False) -> tuple[int, list[dict], list[str]]:
         """Refresh scores only where useful.
 
@@ -207,6 +252,12 @@ class BettingService:
         errors: list[str] = []
         live_events: list[dict] = []
         now = datetime.now(timezone.utc)
+        try:
+            kickoff_events = await self._promote_scheduled_kickoffs()
+            live_events.extend(kickoff_events)
+            score_updates += len(kickoff_events)
+        except Exception:
+            kickoff_events = []
         from_time = (now - timedelta(minutes=SETTINGS.live_panel_lookback_minutes)).isoformat()
         to_time = (now + timedelta(minutes=SETTINGS.live_panel_lookahead_minutes)).isoformat()
 
@@ -356,9 +407,10 @@ class BettingService:
                 # for the fast live loop, so the free odds quota is preserved.
                 if not raws and has_pending_bet:
                     raws = await self.odds_api.fetch_scores(key, days_from=3, force=False)
-                    score_source = "PropLine secours" if raws else "aucune donnée live"
+                    score_source = "football-data.org secours" if raws else "aucune donnée live"
                 if force_api:
                     self._last_live_score_poll[key] = datetime.now(timezone.utc)
+                raws = self._sort_live_rows(list(raws or []), key)
                 await self.db.set_setting(f"diag_scores_{key}", len(raws or []))
                 await self.db.set_setting(f"diag_scores_source_{key}", score_source)
 
@@ -435,6 +487,9 @@ class BettingService:
                     aws_i = int(aws) if aws is not None else None
                     old_phase = str(old["live_phase"] or old["match_status"] or "pending")
                     new_phase = status
+                    if new_phase == "pending" and old_phase in {"kickoff_wait","live","first_half","halftime","second_half","extra_time","penalties","suspended"}:
+                        new_phase = old_phase
+                        status = old_phase
                     old_clock = str(old["live_clock"] or "")
                     new_clock = str(event.get("live_clock") or "")
                     old_detail = str(old["live_detail"] or "")
@@ -483,7 +538,7 @@ class BettingService:
                         })
 
                     if status in {"cancelled", "postponed"}:
-                        await self.void_event(target_event_id, note="Match annulé/reporté par PropLine")
+                        await self.void_event(target_event_id, note="Match annulé/reporté par la source football")
                     elif status == "finished" and hs_i is not None and aws_i is not None:
                         settlements.extend(await self.settle_event(target_event_id, hs_i, aws_i))
             except Exception as exc:
@@ -519,7 +574,7 @@ class BettingService:
                 WHERE sport_key IN ({placeholders})
                   AND commence_time BETWEEN ? AND ?
                   AND (
-                       live_phase IN ('live','first_half','halftime','second_half','extra_time','penalties','suspended')
+                       live_phase IN ('kickoff_wait','live','first_half','halftime','second_half','extra_time','penalties','suspended')
                        OR (live_phase IN ('finished','cancelled','postponed') AND last_score_update>=?)
                   )
                 ORDER BY completed ASC, commence_time ASC LIMIT ?""",
@@ -568,7 +623,7 @@ class BettingService:
             """SELECT b.*,m.home_team,m.away_team,m.home_score,m.away_score,m.live_phase,m.live_clock
                FROM bets b JOIN matches m ON m.event_id=b.event_id
                WHERE b.user_id=? AND b.status='PENDING'
-                 AND m.live_phase IN ('live','first_half','halftime','second_half','extra_time','penalties','suspended')
+                 AND m.live_phase IN ('kickoff_wait','live','first_half','halftime','second_half','extra_time','penalties','suspended')
                ORDER BY b.created_at DESC LIMIT ?""", (user_id, limit))
 
     async def settle_event(self, event_id: str, home_score: int, away_score: int) -> list[dict]:
@@ -967,6 +1022,9 @@ class BettingService:
                 "events": int(await self.db.get_setting(f"diag_events_{key}") or 0),
                 "odds": int(await self.db.get_setting(f"diag_odds_{key}") or 0),
                 "parsed": int(await self.db.get_setting(f"diag_parsed_{key}") or 0),
+                "live_rows": int(await self.db.get_setting(f"diag_scores_{key}") or 0),
+                "live_source": str(await self.db.get_setting(f"diag_scores_source_{key}") or "—"),
+                "odds_source": str(await self.db.get_setting(f"diag_odds_source_{key}") or "Oddium Fusion"),
             })
         try:
             selected_books = await self.odds_api.selected_bookmakers()

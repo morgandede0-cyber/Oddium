@@ -29,6 +29,15 @@ class OddsAPI:
     """
 
     BASE = "https://api.prop-line.com/v1"
+    FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
+    FOOTBALL_DATA_CODES = {
+        "soccer_epl": "PL",
+        "soccer_spain_la_liga": "PD",
+        "soccer_france_ligue_one": "FL1",
+        "soccer_germany_bundesliga": "BL1",
+        "soccer_italy_serie_a": "SA",
+        "soccer_uefa_champs_league": "CL",
+    }
     # PropLine accepts The Odds API soccer keys as aliases.  Keep the exact
     # canonical keys used by Oddium instead of translating them to guessed
     # PropLine names (those invalid translations caused HTTP 500 responses).
@@ -277,6 +286,70 @@ class OddsAPI:
                     raise OddsAPIError(str(exc)) from exc
         raise OddsAPIError(self.last_error or "Erreur PropLine")
 
+    async def _football_data_get(self, path: str, params: dict | None = None, *, cache_ttl: int = 0, force: bool = False):
+        """GET football-data.org v4 avec cache disque Oddium."""
+        if not SETTINGS.football_data_api_key:
+            raise OddsAPIError("FOOTBALL_DATA_API_KEY manquante dans .env / Coolify")
+        params = dict(params or {})
+        cache_path = f"football-data:{path}"
+        if cache_ttl > 0 and not force:
+            cached = self._read_cache(cache_path, params, cache_ttl)
+            if cached is not None:
+                return cached
+        await self.start()
+        assert self.session is not None
+        headers = {"X-Auth-Token": SETTINGS.football_data_api_key}
+        async with self._request_lock:
+            await self._respect_rate_limit()
+            try:
+                async with self.session.get(f"{self.FOOTBALL_DATA_BASE}{path}", params=params, headers=headers) as resp:
+                    self._last_request_monotonic = time.monotonic()
+                    self.last_status = resp.status
+                    if resp.status == 200:
+                        data = await resp.json()
+                        self.last_error = None
+                        if cache_ttl > 0:
+                            self._write_cache(cache_path, params, data)
+                        return data
+                    text = await resp.text()
+                    self.last_error = f"football-data.org HTTP {resp.status}: {text[:300]}"
+                    stale = self._read_cache(cache_path, params, cache_ttl, stale=True) if cache_ttl else None
+                    if stale is not None:
+                        return stale
+                    raise OddsAPIError(self.last_error)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                self.last_error = f"football-data.org: {exc}"
+                stale = self._read_cache(cache_path, params, cache_ttl, stale=True) if cache_ttl else None
+                if stale is not None:
+                    return stale
+                raise OddsAPIError(self.last_error) from exc
+
+    @staticmethod
+    def _football_data_match_to_shell(match: dict) -> dict:
+        home = match.get("homeTeam") or {}
+        away = match.get("awayTeam") or {}
+        score = match.get("score") or {}
+        full = score.get("fullTime") or {}
+        status_map = {
+            "SCHEDULED": "pending", "TIMED": "pending",
+            "IN_PLAY": "live", "PAUSED": "halftime",
+            "FINISHED": "finished", "POSTPONED": "postponed",
+            "SUSPENDED": "suspended", "CANCELLED": "cancelled",
+        }
+        return {
+            "id": f"fd:{match.get('id')}",
+            "home_team": home.get("name") or home.get("shortName"),
+            "away_team": away.get("name") or away.get("shortName"),
+            "home_team_id": f"fd.team:{home.get('id')}" if home.get("id") is not None else None,
+            "away_team_id": f"fd.team:{away.get('id')}" if away.get("id") is not None else None,
+            "commence_time": match.get("utcDate"),
+            "status": status_map.get(str(match.get("status") or "").upper(), "pending"),
+            "home_score": full.get("home"),
+            "away_score": full.get("away"),
+            "status_detail": match.get("status"),
+            "source": "football-data.org",
+        }
+
     def provider_sport_key(self, sport_key: str) -> str:
         if sport_key not in self.SPORT_KEYS:
             raise OddsAPIError(
@@ -288,9 +361,21 @@ class OddsAPI:
         return [f"PropLine • préférence: {SETTINGS.propline_bookmakers}"]
 
     async def fetch_events(self, sport_key: str, *, statuses: str = "pending,live", priority: bool = False):
+        # V9.1.3: calendriers gratuits via football-data.org pour les ligues Oddium.
+        code = self.FOOTBALL_DATA_CODES.get(sport_key)
+        if code and SETTINGS.football_data_api_key:
+            now = datetime.now(timezone.utc)
+            params = {
+                "dateFrom": now.date().isoformat(),
+                "dateTo": (now + timedelta(days=30)).date().isoformat(),
+            }
+            payload = await self._football_data_get(
+                f"/competitions/{code}/matches", params, cache_ttl=SETTINGS.fixtures_cache_seconds
+            ) or {}
+            return [self._football_data_match_to_shell(m) for m in (payload.get("matches") or [])]
+        # Fallback PropLine si aucune cle football-data.org n'est configuree.
         provider_key = self.provider_sport_key(sport_key)
-        ttl = SETTINGS.fixtures_cache_seconds
-        return await self._get(f"/sports/{provider_key}/events", cache_ttl=ttl, force=False) or []
+        return await self._get(f"/sports/{provider_key}/events", cache_ttl=SETTINGS.fixtures_cache_seconds, force=False) or []
 
     async def fetch_bulk_odds(self, sport_key: str, *, force: bool = False):
         """One API call returns h2h for every upcoming event in the competition."""
@@ -1031,19 +1116,24 @@ class OddsAPI:
         return rows
 
     async def fetch_scores(self, sport_key: str, *, days_from: int = 3, force: bool = False):
-        """Fetch PropLine scores.
-
-        Live polling deliberately supports ``force=True`` so a previous disk cache cannot
-        hide a goal that has just been scored. The service only forces this endpoint for
-        competitions that actually have a match around the current time, which keeps the
-        free-tier request usage low.
-        """
+        """Scores via football-data.org; fallback PropLine si necessaire."""
+        code = self.FOOTBALL_DATA_CODES.get(sport_key)
+        if code and SETTINGS.football_data_api_key:
+            now = datetime.now(timezone.utc)
+            params = {
+                "dateFrom": (now - timedelta(days=max(1, min(int(days_from), 7)))).date().isoformat(),
+                "dateTo": now.date().isoformat(),
+            }
+            payload = await self._football_data_get(
+                f"/competitions/{code}/matches", params,
+                cache_ttl=SETTINGS.scores_cache_seconds, force=force
+            ) or {}
+            return [self._football_data_match_to_shell(m) for m in (payload.get("matches") or [])]
         provider_key = self.provider_sport_key(sport_key)
         return await self._get(
             f"/sports/{provider_key}/scores",
             {"days_from": max(1, min(int(days_from), 7))},
-            cache_ttl=SETTINGS.scores_cache_seconds,
-            force=force,
+            cache_ttl=SETTINGS.scores_cache_seconds, force=force,
         ) or []
 
     async def _league_odds_ttl(self, sport_key: str) -> int:
@@ -1234,5 +1324,10 @@ class OddsAPI:
         return await self.fetch_events(sport_key)
 
     async def fetch_standings(self, sport_key: str, *, season: int | None = None, force: bool = False):
-        # PropLine is intentionally only used for fixtures/odds/scores here.
-        return {}
+        code = self.FOOTBALL_DATA_CODES.get(sport_key)
+        if not code or not SETTINGS.football_data_api_key:
+            return {}
+        payload = await self._football_data_get(
+            f"/competitions/{code}/standings", cache_ttl=SETTINGS.standings_cache_seconds, force=force
+        ) or {}
+        return payload

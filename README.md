@@ -1,13 +1,6 @@
+# ODDIUM V10 — FREE-FIRST
 
-## Panneau Matchs en direct (V8.1)
-
-Utilise `/setup_live` dans le salon où tu veux le tableau des scores.
-Le message est épinglé et se met à jour automatiquement lorsque PropLine renvoie un nouveau score ou un changement de statut.
-Le polling est fait côté bot avec cache : les utilisateurs Discord ne consomment aucune requête API.
-
-# ODDIUM V8 — PropLine
-
-Bot Discord de paris football virtuels avec cotes bookmaker réelles.
+Bot Discord de paris football **virtuels** avec calendrier, scores live, suivi de matchs, économie, paris simples/combinés et cotes calculées automatiquement.
 
 ## Compétitions
 - Ligue 1
@@ -17,20 +10,31 @@ Bot Discord de paris football virtuels avec cotes bookmaker réelles.
 - Serie A
 - Ligue des Champions
 
-## Cotes
-Les cotes viennent de PropLine (`h2h` / 1X2). Oddium ne génère plus de cote avec Elo, Poisson, Dixon-Coles ou ML.
+## Architecture des données
 
-Une seule grille bookmaker complète est utilisée pour chaque match selon l'ordre `PROPLINE_BOOKMAKERS`. Les prix américains du bookmaker sont convertis de façon déterministe en cotes décimales.
+- **football-data.org** : calendrier canonique, résultats et classements.
+- **ESPN + Sofascore + FotMob + TheSportsDB** : live redondant et détection des changements de statut.
+- **football-data.co.uk** : consensus de marché public quand disponible.
+- **Oddium Fusion** : moteur 1/N/2 qui combine le consensus public avec un modèle Poisson basé sur les forces offensives/défensives et le classement.
+- **SQLite** : source locale de vérité pour l'interface Discord et les paris.
 
-## Cache
-Le bot utilise deux niveaux de cache : SQLite pour le fonctionnement Discord et `data/api_cache_propline` pour les réponses PropLine. Un clic utilisateur ne déclenche aucune requête API.
+Oddium ne dépend plus d'une API de cotes payante pour fonctionner. `PROPLINE_API_KEY` reste optionnelle uniquement pour compatibilité avec les anciennes versions.
 
-La récupération des cotes se fait en **bulk par championnat**, pas match par match. Voir `V8_PROPLINE_CACHE.md`.
+## Live V10
 
-## Installation
+Le match apparaît dans le panneau dès son heure officielle de coup d'envoi avec l'état **confirmation live en attente**. Dès qu'un fournisseur confirme le direct, son statut, son chrono et son score remplacent immédiatement l'état provisoire.
+
+Les observations de plusieurs fournisseurs sont triées pour empêcher une source lente en `pending` de faire disparaître un match déjà confirmé `live` par ESPN/Sofascore.
+
+## Installation locale
 1. Lance `INSTALLER.bat`.
-2. Copie `.env.example` en `.env` si besoin.
-3. Renseigne `DISCORD_TOKEN=` et `PROPLINE_API_KEY=`.
+2. Copie `.env.example` en `.env`.
+3. Renseigne au minimum `DISCORD_TOKEN=` et `FOOTBALL_DATA_API_KEY=`.
 4. Lance `DEMARRER.bat`.
+5. Sur Discord : `/setup` puis, si tu veux un panneau live séparé, `/setup_live`.
 
-Ne partage jamais tes clés.
+## GitHub
+
+`PUSH_ODDIUM_GITHUB.bat` refuse de pousser si la racine Git n'est pas exactement le dossier Oddium ou si `origin` ne ressemble pas à un dépôt Oddium. Cela évite d'envoyer par erreur `AppData`, `Documents` ou le dépôt Legacy.
+
+Ne partage jamais ton token Discord ni ta clé football-data.org.

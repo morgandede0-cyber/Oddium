@@ -25,8 +25,9 @@ def _bool(name: str, default: bool) -> bool:
 class Settings:
     discord_token: str = os.getenv("DISCORD_TOKEN", "")
     propline_api_key: str = os.getenv("PROPLINE_API_KEY", "")
-    # Backward-compatible aliases used by old admin/UI checks.
-    football_data_api_key: str = os.getenv("PROPLINE_API_KEY", "")
+    # football-data.org: source gratuite pour calendriers / scores / classements.
+    football_data_api_key: str = os.getenv("FOOTBALL_DATA_API_KEY", "")
+    # Ancien alias conserve pour compatibilite avec le reste du bot.
     odds_api_key: str = os.getenv("PROPLINE_API_KEY", "")
     guild_id: int | None = int(os.getenv("GUILD_ID")) if os.getenv("GUILD_ID") else None
 
@@ -35,7 +36,9 @@ class Settings:
     log_dir: str = os.getenv("LOG_DIR", "logs")
 
     propline_bookmakers: str = os.getenv("PROPLINE_BOOKMAKERS", "pinnacle,bovada,draftkings,fanduel,betmgm,unibet")
-    odds_bookmakers: str = "PropLine • cote réelle bookmaker"
+    odds_bookmakers: str = "Oddium Fusion • marché public + modèle"
+    oddium_odds_margin_percent: int = _int("ODDIUM_ODDS_MARGIN_PERCENT", 6)
+    use_propline_odds: bool = _bool("USE_PROPLINE_ODDS", False)
     currency_name: str = os.getenv("CURRENCY_NAME", "Gold")
     starting_balance: int = _int("STARTING_BALANCE", 5000)
 
@@ -69,8 +72,8 @@ class Settings:
     dm_notifications_default: bool = _bool("DM_NOTIFICATIONS_DEFAULT", True)
     notify_before_minutes: int = _int("NOTIFY_BEFORE_MINUTES", 30)
 
-    market_model_enabled: bool = False
-    market_model_history_years: int = 0
+    market_model_enabled: bool = _bool("MARKET_MODEL_ENABLED", True)
+    market_model_history_years: int = _int("MARKET_MODEL_HISTORY_YEARS", 6)
 
     # ODDIUM V8 — PropLine + cache intelligent.
     # Free tier: 1000 requests/day. Discord never calls the API directly.

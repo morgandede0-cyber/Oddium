@@ -250,9 +250,12 @@ class MatchSelect(discord.ui.Select):
             return
         embed = discord.Embed(title=f"⚽ {match['home_team']} — {match['away_team']}", color=discord.Color.blurple())
         embed.description = f"🏆 **{match['competition_name']}**\n🕒 {fmt_dt(match['commence_time'])}"
-        embed.add_field(name="1 — Domicile", value=f"**{match['home_team']}**\n`{match['home_odd']:.2f}` {trend['home']}", inline=True)
-        embed.add_field(name="N — Nul", value=f"**Match nul**\n`{match['draw_odd']:.2f}` {trend['draw']}", inline=True)
-        embed.add_field(name="2 — Extérieur", value=f"**{match['away_team']}**\n`{match['away_odd']:.2f}` {trend['away']}", inline=True)
+        inv = [1.0 / float(match['home_odd']), 1.0 / float(match['draw_odd']), 1.0 / float(match['away_odd'])]
+        total_inv = sum(inv) or 1.0
+        probs = [round(100.0 * x / total_inv) for x in inv]
+        embed.add_field(name="1 — Domicile", value=f"**{match['home_team']}**\n`{match['home_odd']:.2f}` {trend['home']}\n📊 {probs[0]}%", inline=True)
+        embed.add_field(name="N — Nul", value=f"**Match nul**\n`{match['draw_odd']:.2f}` {trend['draw']}\n📊 {probs[1]}%", inline=True)
+        embed.add_field(name="2 — Extérieur", value=f"**{match['away_team']}**\n`{match['away_odd']:.2f}` {trend['away']}\n📊 {probs[2]}%", inline=True)
         embed.set_footer(text=f"Cotes {match['bookmaker']} • cote figée au moment de la validation")
         await interaction.response.send_message(embed=embed, view=MatchBetView(self.service, match), ephemeral=True)
 
@@ -706,10 +709,10 @@ class AdminPanelView(discord.ui.View):
     async def health(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = await self.service.api_status()
         embed = discord.Embed(title="🩺 État Oddium", color=discord.Color.green() if not s["last_error"] else discord.Color.orange())
-        embed.add_field(name="football-data.org", value=f"HTTP {s['last_status'] or '?'}\nRequêtes restantes/min: {s['remaining']}\nAppels locaux aujourd'hui: {s['used']}", inline=True)
+        embed.add_field(name="Données football", value=f"football-data.org HTTP {s['last_status'] or '?'}\nMoteur cotes : Oddium Fusion\nLive : ESPN + Sofascore + FotMob", inline=True)
         embed.add_field(name="Activité", value=f"Matchs futurs: {s['future_matches']}\nParis en cours: {s['pending_bets']}", inline=True)
         diag_lines = [
-            f"**{d['name']}** — événements: `{d['events']}` • matchs: `{d['odds']}` • cotes calculées: `{d['parsed']}`"
+            f"**{d['name']}** — fixtures `{d['events']}` • cotes `{d['parsed']}` • live `{d.get('live_rows',0)}`\n↳ {d.get('live_source','—')}"
             for d in s.get("diagnostics", [])
         ]
         if diag_lines:
@@ -815,7 +818,7 @@ async def build_title_embed(service: BettingService) -> discord.Embed:
     embed.set_image(url="attachment://oddium_welcome.png")
     embed.add_field(name="⚽ Voir les matchs", value="Parcours les championnats et consulte les rencontres disponibles.", inline=True)
     embed.add_field(name="🎟️ Parier", value="Choisis entre **pari simple** et **pari combiné**.", inline=True)
-    embed.set_footer(text=f"ODDIUM • {count} match(s) disponibles • Cotes réelles PropLine")
+    embed.set_footer(text=f"ODDIUM • {count} match(s) disponibles • Cotes Oddium Fusion")
     return embed
 
 
@@ -1122,7 +1125,7 @@ async def build_title_embed(service: BettingService) -> discord.Embed:
     e.add_field(name="⚽ Matchs", value="Championnats, horaires et cotes", inline=True)
     e.add_field(name="🎟️ Parier", value="Simple ou combiné", inline=True)
     e.add_field(name="📋 Mes paris", value="Tickets et résultats", inline=True)
-    e.set_footer(text="ODDIUM • Cotes réelles PropLine • Données live gratuites • Gold virtuel")
+    e.set_footer(text="ODDIUM • Cotes Oddium Fusion • Données live gratuites • Gold virtuel")
     return e
 
 class HomeReturnView(discord.ui.View):
