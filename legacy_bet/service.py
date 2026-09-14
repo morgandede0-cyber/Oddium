@@ -31,6 +31,8 @@ class BettingService:
         self._last_events_refresh: datetime | None = None
         self._last_live_score_poll: dict[str, datetime] = {}
         self._last_live_discovery: dict[str, datetime] = {}
+        # Per-fixture throttle for direct 5Dollar reconciliation of stale kickoff rows.
+        self._last_five_dollar_reconcile: dict[str, datetime] = {}
         self.last_live_events: list[dict] = []
 
     async def active_competitions(self) -> list[str]:
@@ -235,6 +237,72 @@ class BettingService:
         )
         self._last_engine_odds_attempt = now
         return await self.refresh_odds(priority=False, discover=discover)
+
+    async def _expire_unconfirmed_kickoffs(self) -> int:
+        """Stop showing a fake live match when no provider ever confirmed kickoff.
+
+        ``kickoff_wait`` is only a short grace state.  A football match must not stay
+        orange for hours after it has actually ended just because the schedule clock
+        fired and the live feed did not match the fixture.  After 150 minutes, the
+        row is returned to a neutral pending/result-wait state and disappears from
+        the Live panel.  A later provider result can still update and settle it.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=150)).isoformat()
+        rows = await self.db.fetchall(
+            """SELECT event_id FROM matches
+               WHERE completed=0 AND cancelled=0
+                 AND live_phase='kickoff_wait'
+                 AND commence_time < ?""",
+            (cutoff,),
+        )
+        for row in rows:
+            await self.db.execute(
+                """UPDATE matches
+                   SET live_phase='pending', match_status='pending', live_clock=NULL,
+                       live_detail='Résultat en attente de confirmation',
+                       live_source=NULL
+                   WHERE event_id=? AND live_phase='kickoff_wait'""",
+                (str(row["event_id"]),),
+            )
+        return len(rows)
+
+    async def _five_dollar_reconcile_rows(self, sport_key: str) -> list[dict]:
+        """Ask 5Dollar directly for stale scheduled rows that should already be live/finished.
+
+        The global ``status=live`` endpoint stops returning a fixture once it is over.
+        If Oddium missed the live transition, a row could otherwise remain in
+        ``kickoff_wait`` forever.  Known 5Dollar fixture ids are therefore checked
+        directly, at most once every 5 minutes per fixture.
+        """
+        if not SETTINGS.five_dollar_api_key:
+            return []
+        now = datetime.now(timezone.utc)
+        lo = (now - timedelta(hours=4)).isoformat()
+        hi = (now - timedelta(minutes=15)).isoformat()
+        rows = await self.db.fetchall(
+            """SELECT event_id,five_dollar_fixture_id FROM matches
+               WHERE sport_key=? AND completed=0 AND cancelled=0
+                 AND live_phase='kickoff_wait'
+                 AND five_dollar_fixture_id IS NOT NULL
+                 AND commence_time BETWEEN ? AND ?
+               ORDER BY commence_time ASC LIMIT 4""",
+            (sport_key, lo, hi),
+        )
+        out: list[dict] = []
+        for row in rows:
+            event_id = str(row["event_id"] or "")
+            last = self._last_five_dollar_reconcile.get(event_id)
+            if last and (now - last).total_seconds() < 300:
+                continue
+            self._last_five_dollar_reconcile[event_id] = now
+            try:
+                details = await self.odds_api.fetch_five_dollar_details(int(row["five_dollar_fixture_id"]), force=True)
+                shell = (details or {}).get("fixture") or {}
+                if shell:
+                    out.append(shell)
+            except Exception:
+                continue
+        return out
 
     async def _promote_scheduled_kickoffs(self) -> list[dict]:
         """Make a fixture visible the instant its scheduled kickoff is reached.
@@ -441,6 +509,14 @@ class BettingService:
                     )
 
                 raws = list(open_rows or []) + list(espn_rows or []) + list(fotmob_rows or []) + list(sportsdb_rows or []) + list(sofa_rows or []) + list(sofa_live_rows or []) + list(five_dollar_rows or [])
+                # V13.2: reconcile scheduled rows that 5Dollar no longer returns in
+                # ``status=live`` (for example when Oddium missed the transition and
+                # the match is already finished).  The direct fixture endpoint is
+                # throttled per match and feeds the exact same canonical update path.
+                try:
+                    raws.extend(await self._five_dollar_reconcile_rows(key))
+                except Exception:
+                    pass
                 sources = []
                 if five_dollar_rows:
                     sources.append("5Dollar")
@@ -633,6 +709,13 @@ class BettingService:
                         settlements.extend(await self.settle_event(target_event_id, hs_i, aws_i))
             except Exception as exc:
                 errors.append(f"{COMPETITIONS.get(key, {}).get('name', key)}: {exc}")
+
+        # A kickoff placeholder is temporary only. If every provider missed the
+        # match, remove the false orange LIVE state after a normal match duration.
+        try:
+            await self._expire_unconfirmed_kickoffs()
+        except Exception:
+            pass
 
         # Snapshot de santé du collecteur, utilisé par le watchdog et les diagnostics.
         try:
