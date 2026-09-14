@@ -217,45 +217,67 @@ class FiveDollarClient:
         return {"standings": [{"type": "TOTAL", "table": combined}], "source": "5DollarFootballAPI"}
 
     @staticmethod
-    def _status(item: dict[str, Any]) -> str:
-        raw = str(item.get("status") or "scheduled").lower()
+    def _minute(item: dict[str, Any]) -> int | None:
+        """Extract the live minute from the different payload shapes seen on 5Dollar."""
+        candidates = [
+            item.get("minute"), item.get("elapsed"), item.get("match_minute"),
+            item.get("live_minute"), item.get("timer"), item.get("status_code"),
+        ]
+        for container_key in ("time", "clock", "status_info", "status_data"):
+            obj = item.get(container_key)
+            if isinstance(obj, dict):
+                candidates.extend([obj.get("minute"), obj.get("elapsed"), obj.get("current"), obj.get("value")])
+        status_obj = item.get("status")
+        if isinstance(status_obj, dict):
+            candidates.extend([status_obj.get("minute"), status_obj.get("elapsed"), status_obj.get("code")])
+        for value in candidates:
+            if value in (None, "") or isinstance(value, dict):
+                continue
+            text = str(value).strip().lower().replace("'", "")
+            if text in {"half", "ht", "full", "ft", "live", "in_play"}:
+                continue
+            try:
+                minute = int(float(text))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= minute <= 130:
+                return minute
+        return None
+
+    @classmethod
+    def _status(cls, item: dict[str, Any]) -> str:
+        raw_obj = item.get("status")
+        raw = str(raw_obj.get("name") or raw_obj.get("status") or raw_obj.get("code") or "scheduled" if isinstance(raw_obj, dict) else raw_obj or "scheduled").lower()
         code = str(item.get("status_code") or "").lower()
-        reason = str(item.get("status_reason") or "").lower()
-        if raw == "finished" or code == "full":
+        if isinstance(raw_obj, dict):
+            code = str(raw_obj.get("code") or code).lower()
+        if raw in {"finished", "complete", "completed", "ft"} or code in {"full", "ft"}:
             return "finished"
-        if raw in {"live", "in_play"}:
+        if raw in {"live", "in_play", "inplay", "playing"}:
             if code in {"half", "ht"}:
                 return "halftime"
-            try:
-                minute = int(code.replace("'", ""))
-            except ValueError:
-                minute = 0
+            minute = cls._minute(item) or 0
             if minute > 45:
                 return "second_half"
             if minute > 0:
                 return "first_half"
             return "live"
         if raw == "unknown":
-            # The provider deliberately uses `unknown` when kickoff/result is not
-            # yet confirmed. Never convert that into postponed/cancelled: doing so
-            # could void a valid Oddium bet. Keep the match unresolved instead.
             return "suspended"
         return "pending"
 
-    @staticmethod
-    def _clock(item: dict[str, Any]) -> str:
+    @classmethod
+    def _clock(cls, item: dict[str, Any]) -> str:
+        raw_obj = item.get("status")
         code = str(item.get("status_code") or "").strip().lower()
-        if not code:
-            return ""
-        if code == "half":
+        if isinstance(raw_obj, dict):
+            code = str(raw_obj.get("code") or code).strip().lower()
+        if code in {"half", "ht"}:
             return "MT"
-        if code == "full":
+        if code in {"full", "ft"}:
             return "FT"
-        try:
-            minute = int(float(code))
-            return f"{minute}'"
-        except ValueError:
-            return code.upper()
+        minute = cls._minute(item)
+        return f"{minute}'" if minute is not None else ""
 
     @staticmethod
     def _normalize_event(ev: dict[str, Any], home: str, away: str) -> dict[str, Any] | None:

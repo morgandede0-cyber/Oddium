@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
@@ -79,6 +79,30 @@ class PanelManager:
         if isinstance(channel, discord.TextChannel):
             await self.ensure_panel(channel)
 
+
+    @staticmethod
+    def _display_clock(row, phase: str) -> str:
+        """Provider clock first; kickoff-based estimate only when a live provider omits it."""
+        clock = str(row["live_clock"] or "").strip()
+        if clock:
+            return clock
+        if phase not in {"live", "first_half", "second_half"}:
+            return ""
+        try:
+            kickoff = datetime.fromisoformat(str(row["commence_time"]).replace("Z", "+00:00"))
+            if kickoff.tzinfo is None:
+                kickoff = kickoff.replace(tzinfo=timezone.utc)
+            elapsed = max(0, int((datetime.now(timezone.utc) - kickoff.astimezone(timezone.utc)).total_seconds() // 60))
+        except Exception:
+            return ""
+        # A missing provider timer must never fabricate an impossible football minute.
+        if phase in {"live", "first_half"}:
+            minute = min(elapsed, 45)
+        else:
+            # Approximate a 15-minute half-time when the provider confirms 2H but omits elapsed.
+            minute = min(90, max(46, elapsed - 15))
+        return f"~{minute}'" if minute > 0 else ""
+
     async def build_live_embed(self) -> discord.Embed:
         """V13 premium live board: one compact card, no provider/debug noise."""
         rows = await self.service.live_matches(25)
@@ -106,7 +130,7 @@ class PanelManager:
             aws = "–" if m["away_score"] is None else str(m["away_score"])
             phase = str(m["live_phase"] or m["match_status"] or "live").lower()
             status = labels.get(phase, "🔴 DIRECT")
-            clock = str(m["live_clock"] or "").strip()
+            clock = self._display_clock(m, phase)
             if clock and phase not in {"halftime", "finished", "postponed", "cancelled"}:
                 status += f" • {clock}"
             blocks.append(
