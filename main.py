@@ -187,7 +187,7 @@ async def diagnostic_oddium(interaction: discord.Interaction):
     live_count = int(await db.get_setting("live_engine_visible_count") or 0)
     last_scan = await db.get_setting("live_engine_last_scan")
     embed = discord.Embed(
-        title="🩺 Diagnostic Oddium V12",
+        title="🩺 Diagnostic Oddium V13",
         description="5Dollar Engine • fixtures + Bet365 + live/events/stats • ESPN/Sofascore/FotMob/TheSportsDB en secours",
         color=discord.Color.green() if not status.get("last_error") else discord.Color.orange(),
     )
@@ -258,7 +258,7 @@ async def live_collector_supervisor():
     can no longer stop the collector. Public-source caches in OddsAPI bound network use.
     """
     await bot.wait_until_ready()
-    log.info("Oddium Live Engine V10 démarré • scan autonome des 6 compétitions")
+    log.info("Oddium V13 Premium UI • 5Dollar Engine • Live dédupliqué")
     previous_signature = None
     failures = 0
     while not bot.is_closed():

@@ -691,17 +691,80 @@ class BettingService:
                     external = {}
         return {"match": match, "events": list(reversed(recent)), "external": external}
 
+    @staticmethod
+    def _team_display_key(value: str | None) -> str:
+        """Normalize provider-specific club names for display de-duplication.
+
+        Providers routinely alternate between forms such as Torino/Torino FC,
+        Roma/AS Roma, Como/Como 1907 or Parma/Parma Calcio 1913. This key is
+        deliberately display-only: database/provider ids remain untouched.
+        """
+        import re
+        import unicodedata
+        text = unicodedata.normalize("NFKD", str(value or ""))
+        text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+        words = re.findall(r"[a-z0-9]+", text)
+        noise = {"fc", "cf", "ac", "afc", "ssc", "calcio", "club", "football", "futbol"}
+        words = [w for w in words if w not in noise and not re.fullmatch(r"(?:18|19|20)\d{2}", w)]
+        # Short legal prefixes are useful only when they are part of a longer
+        # distinctive name. Dropping them solves AS Roma / Roma, FC Barcelona / Barcelona.
+        while len(words) > 1 and words[0] in {"as", "fc", "ac", "ssc", "cf"}:
+            words.pop(0)
+        return "".join(words)
+
+    def _dedupe_match_rows(self, rows, limit: int = 25):
+        """Collapse the same real fixture returned by multiple providers."""
+        phase_rank = {
+            "pending": 0, "kickoff_wait": 1, "suspended": 2,
+            "live": 3, "first_half": 4, "halftime": 5, "second_half": 6,
+            "extra_time": 7, "penalties": 8, "finished": 9,
+            "postponed": 9, "cancelled": 9,
+        }
+        source_rank = {
+            "5dollarfootballapi": 100, "5dollar": 100, "api-football": 90,
+            "sofascore live": 80, "sofascore": 75, "espn": 70,
+            "fotmob": 65, "thesportsdb": 50, "horloge oddium": 10,
+        }
+        best = {}
+        for row in rows:
+            try:
+                kickoff = parse_iso(str(row["commence_time"])).astimezone(timezone.utc)
+                # Provider kickoff timestamps can differ slightly; hour bucket plus teams
+                # is more stable than the provider event id.
+                bucket = kickoff.strftime("%Y-%m-%d-%H")
+            except Exception:
+                bucket = str(row["commence_time"] or "")[:13]
+            key = (
+                str(row["sport_key"]), bucket,
+                self._team_display_key(row["home_team"]),
+                self._team_display_key(row["away_team"]),
+            )
+            phase = str(row["live_phase"] or row["match_status"] or "pending").lower()
+            source = str(row["live_source"] or "").lower()
+            score_known = int(row["home_score"] is not None and row["away_score"] is not None)
+            clock = str(row["live_clock"] or "")
+            minute = 0
+            try:
+                minute = int(''.join(ch for ch in clock.split('+', 1)[0] if ch.isdigit()) or 0)
+            except Exception:
+                pass
+            rank = (phase_rank.get(phase, 0), score_known, minute, source_rank.get(source, 20))
+            current = best.get(key)
+            if current is None or rank > current[0]:
+                best[key] = (rank, row)
+        unique = [pair[1] for pair in best.values()]
+        unique.sort(key=lambda r: (int(r["completed"] or 0), str(r["commence_time"])))
+        return unique[:limit]
+
     async def live_matches(self, limit: int = 25):
-        """Rows displayed by the permanent live-score panel."""
+        """Rows displayed by the permanent live-score panel, de-duplicated across providers."""
         now = datetime.now(timezone.utc)
         start = (now - timedelta(minutes=SETTINGS.live_panel_lookback_minutes)).isoformat()
         end = (now + timedelta(minutes=SETTINGS.live_panel_lookahead_minutes)).isoformat()
-        # V9.0.5: le panneau Live affiche les 6 compétitions supportées,
-        # même si l'une d'elles est désactivée dans les réglages de paris.
         live_keys = list(COMPETITIONS.keys())
         placeholders = ",".join("?" for _ in live_keys)
         recent_terminal = (now - timedelta(minutes=SETTINGS.live_finished_display_minutes)).isoformat()
-        return await self.db.fetchall(
+        rows = await self.db.fetchall(
             f"""SELECT * FROM matches
                 WHERE sport_key IN ({placeholders})
                   AND commence_time BETWEEN ? AND ?
@@ -710,8 +773,9 @@ class BettingService:
                        OR (live_phase IN ('finished','cancelled','postponed') AND last_score_update>=?)
                   )
                 ORDER BY completed ASC, commence_time ASC LIMIT ?""",
-            tuple(live_keys) + (start, end, recent_terminal, limit),
+            tuple(live_keys) + (start, end, recent_terminal, max(limit * 4, 100)),
         )
+        return self._dedupe_match_rows(rows, limit)
 
     async def record_live_event(self, event: dict) -> None:
         """Persist the timeline used by the Live Center."""
@@ -882,12 +946,13 @@ class BettingService:
         else:
             start = now_local
             end = now_local + timedelta(days=7)
-        return await self.db.fetchall(
+        rows = await self.db.fetchall(
             """SELECT * FROM matches WHERE sport_key=? AND commence_time>=? AND commence_time<?
                AND completed=0 AND cancelled=0 AND odds_available=1
                ORDER BY commence_time ASC LIMIT ?""",
-            (sport_key, start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat(), limit),
+            (sport_key, start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat(), max(limit * 3, 75)),
         )
+        return self._dedupe_match_rows(rows, limit)
 
     async def current_and_future_matches(self, limit: int = 12):
         active = await self.active_competitions()
