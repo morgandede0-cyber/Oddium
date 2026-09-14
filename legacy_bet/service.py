@@ -70,17 +70,10 @@ class BettingService:
                     existing = await self.db.fetchone("SELECT event_id FROM matches WHERE event_id=?", (event_id,))
                     if existing is None and event.get("home_team") and event.get("away_team"):
                         try:
-                            kickoff = parse_iso(str(event["commence_time"]))
-                            lo = (kickoff - timedelta(hours=3)).isoformat()
-                            hi = (kickoff + timedelta(hours=3)).isoformat()
-                            candidates = await self.db.fetchall(
-                                "SELECT event_id,home_team,away_team FROM matches WHERE sport_key=? AND commence_time BETWEEN ? AND ?",
-                                (key, lo, hi),
-                            )
-                            hn = self.odds_api._norm(event.get("home_team")); an = self.odds_api._norm(event.get("away_team"))
-                            for cand in candidates:
-                                if self.odds_api._norm(cand["home_team"]) == hn and self.odds_api._norm(cand["away_team"]) == an:
-                                    target_id = str(cand["event_id"]); existing = cand; break
+                            cand = await self._find_existing_fixture_for_provider_event(key, event)
+                            if cand is not None:
+                                target_id = str(cand["event_id"])
+                                existing = cand
                         except Exception:
                             pass
 
@@ -515,21 +508,10 @@ class BettingService:
 
                     if old is None and event.get("home_team") and event.get("away_team") and event.get("commence_time"):
                         try:
-                            kickoff = parse_iso(str(event["commence_time"]))
-                            lo = (kickoff - timedelta(hours=6)).isoformat()
-                            hi = (kickoff + timedelta(hours=6)).isoformat()
-                            candidates = await self.db.fetchall(
-                                """SELECT event_id,home_team,away_team,home_score,away_score,match_status,live_phase,live_clock,live_detail,live_source,completed,cancelled
-                                   FROM matches WHERE sport_key=? AND commence_time BETWEEN ? AND ?""",
-                                (key, lo, hi),
-                            )
-                            hn = self.odds_api._norm(event.get("home_team"))
-                            an = self.odds_api._norm(event.get("away_team"))
-                            for cand in candidates:
-                                if self.odds_api._norm(cand["home_team"]) == hn and self.odds_api._norm(cand["away_team"]) == an:
-                                    old = cand
-                                    target_event_id = str(cand["event_id"])
-                                    break
+                            cand = await self._find_existing_fixture_for_provider_event(key, event)
+                            if cand is not None:
+                                old = cand
+                                target_event_id = str(cand["event_id"])
                         except Exception:
                             pass
 
@@ -693,27 +675,81 @@ class BettingService:
 
     @staticmethod
     def _team_display_key(value: str | None) -> str:
-        """Normalize provider-specific club names for display de-duplication.
+        """Return a provider-agnostic club key.
 
-        Providers routinely alternate between forms such as Torino/Torino FC,
-        Roma/AS Roma, Como/Como 1907 or Parma/Parma Calcio 1913. This key is
-        deliberately display-only: database/provider ids remain untouched.
+        Live providers rarely agree on the exact display name: ``Inter Milan`` /
+        ``FC Internazionale Milano``, ``Como`` / ``Como 1907`` or ``Real Betis`` /
+        ``Real Betis Balompié``.  Oddium must treat those as one real club so one
+        Discord line is edited in-place instead of adding another line.
         """
         import re
         import unicodedata
+
         text = unicodedata.normalize("NFKD", str(value or ""))
         text = "".join(c for c in text if not unicodedata.combining(c)).lower()
         words = re.findall(r"[a-z0-9]+", text)
-        noise = {"fc", "cf", "ac", "afc", "ssc", "calcio", "club", "football", "futbol"}
-        words = [w for w in words if w not in noise and not re.fullmatch(r"(?:18|19|20)\d{2}", w)]
-        # Short legal prefixes are useful only when they are part of a longer
-        # distinctive name. Dropping them solves AS Roma / Roma, FC Barcelona / Barcelona.
-        while len(words) > 1 and words[0] in {"as", "fc", "ac", "ssc", "cf"}:
-            words.pop(0)
-        return "".join(words)
+        noise = {
+            "fc", "cf", "ac", "afc", "ssc", "sc", "as", "us",
+            "calcio", "club", "football", "futbol", "balompie",
+            "1907", "1913",
+        }
+        words = [
+            w for w in words
+            if w not in noise and not re.fullmatch(r"(?:18|19|20)\d{2}", w)
+        ]
+        replacements = {"milano": "milan", "internazionale": "inter"}
+        words = [replacements.get(w, w) for w in words]
 
-    def _dedupe_match_rows(self, rows, limit: int = 25):
-        """Collapse the same real fixture returned by multiple providers."""
+        key = "".join(words)
+        aliases = {
+            "intermilan": "inter",
+            "internazionalemilan": "inter",
+            "internazionale": "inter",
+            "internazionalemilano": "inter",
+            "parmacalcio": "parma",
+            "realbetisbalompie": "realbetis",
+        }
+        return aliases.get(key, key)
+
+    @classmethod
+    def _teams_equivalent(cls, left: str | None, right: str | None) -> bool:
+        """Fuzzy-but-conservative equality for club names from different APIs."""
+        from difflib import SequenceMatcher
+
+        a = cls._team_display_key(left)
+        b = cls._team_display_key(right)
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        # Provider suffix/prefix variants: NewcastleUnited vs NewcastleUnitedFC,
+        # Betis vs BetisBalompie, etc. Avoid tiny ambiguous strings.
+        if min(len(a), len(b)) >= 5 and (a in b or b in a):
+            return True
+        return SequenceMatcher(None, a, b).ratio() >= 0.86
+
+    @staticmethod
+    def _row_kickoff(row):
+        try:
+            return parse_iso(str(row["commence_time"])).astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    @classmethod
+    def _same_fixture_rows(cls, left, right, tolerance_hours: float = 8.0) -> bool:
+        if str(left["sport_key"]) != str(right["sport_key"]):
+            return False
+        if not (cls._teams_equivalent(left["home_team"], right["home_team"]) and
+                cls._teams_equivalent(left["away_team"], right["away_team"])):
+            return False
+        a = cls._row_kickoff(left)
+        b = cls._row_kickoff(right)
+        if a is None or b is None:
+            return True
+        return abs((a - b).total_seconds()) <= tolerance_hours * 3600
+
+    @staticmethod
+    def _live_row_rank(row):
         phase_rank = {
             "pending": 0, "kickoff_wait": 1, "suspended": 2,
             "live": 3, "first_half": 4, "halftime": 5, "second_half": 6,
@@ -725,36 +761,59 @@ class BettingService:
             "sofascore live": 80, "sofascore": 75, "espn": 70,
             "fotmob": 65, "thesportsdb": 50, "horloge oddium": 10,
         }
-        best = {}
-        for row in rows:
-            try:
-                kickoff = parse_iso(str(row["commence_time"])).astimezone(timezone.utc)
-                # Provider kickoff timestamps can differ slightly; hour bucket plus teams
-                # is more stable than the provider event id.
-                bucket = kickoff.strftime("%Y-%m-%d-%H")
-            except Exception:
-                bucket = str(row["commence_time"] or "")[:13]
-            key = (
-                str(row["sport_key"]), bucket,
-                self._team_display_key(row["home_team"]),
-                self._team_display_key(row["away_team"]),
-            )
-            phase = str(row["live_phase"] or row["match_status"] or "pending").lower()
-            source = str(row["live_source"] or "").lower()
-            score_known = int(row["home_score"] is not None and row["away_score"] is not None)
-            clock = str(row["live_clock"] or "")
+        phase = str(row["live_phase"] or row["match_status"] or "pending").lower()
+        source = str(row["live_source"] or "").lower()
+        score_known = int(row["home_score"] is not None and row["away_score"] is not None)
+        clock = str(row["live_clock"] or "")
+        try:
+            minute = int(''.join(ch for ch in clock.split('+', 1)[0] if ch.isdigit()) or 0)
+        except Exception:
             minute = 0
-            try:
-                minute = int(''.join(ch for ch in clock.split('+', 1)[0] if ch.isdigit()) or 0)
-            except Exception:
-                pass
-            rank = (phase_rank.get(phase, 0), score_known, minute, source_rank.get(source, 20))
-            current = best.get(key)
-            if current is None or rank > current[0]:
-                best[key] = (rank, row)
-        unique = [pair[1] for pair in best.values()]
+        # 5Dollar wins ties; a genuinely advanced live state/clock wins over a
+        # stale kickoff placeholder from any provider.
+        return (phase_rank.get(phase, 0), score_known, minute, source_rank.get(source, 20))
+
+    def _dedupe_match_rows(self, rows, limit: int = 25):
+        """Return one row per real fixture, even when provider ids/names differ.
+
+        This is deliberately pairwise instead of using an exact dictionary key.
+        Provider kickoff times can differ by timezone and club names can differ by
+        legal suffixes, so exact keys were the reason V13 could still show duplicates.
+        """
+        ordered = sorted(list(rows or []), key=self._live_row_rank, reverse=True)
+        unique = []
+        for row in ordered:
+            if any(self._same_fixture_rows(row, kept) for kept in unique):
+                continue
+            unique.append(row)
         unique.sort(key=lambda r: (int(r["completed"] or 0), str(r["commence_time"])))
         return unique[:limit]
+
+    async def _find_existing_fixture_for_provider_event(self, sport_key: str, event: dict):
+        """Resolve a provider observation to the already-known Oddium fixture.
+
+        The returned row is the canonical row that will be UPDATED.  This is the
+        core of the 'one match = one line that updates itself' behaviour.
+        """
+        if not event.get("home_team") or not event.get("away_team") or not event.get("commence_time"):
+            return None
+        try:
+            kickoff = parse_iso(str(event["commence_time"]))
+            lo = (kickoff - timedelta(hours=8)).isoformat()
+            hi = (kickoff + timedelta(hours=8)).isoformat()
+        except Exception:
+            return None
+        candidates = await self.db.fetchall(
+            """SELECT * FROM matches
+               WHERE sport_key=? AND commence_time BETWEEN ? AND ?
+               ORDER BY CASE WHEN five_dollar_fixture_id IS NOT NULL THEN 0 ELSE 1 END, first_seen_at ASC""",
+            (sport_key, lo, hi),
+        )
+        for cand in candidates:
+            if (self._teams_equivalent(event.get("home_team"), cand["home_team"]) and
+                    self._teams_equivalent(event.get("away_team"), cand["away_team"])):
+                return cand
+        return None
 
     async def live_matches(self, limit: int = 25):
         """Rows displayed by the permanent live-score panel, de-duplicated across providers."""
