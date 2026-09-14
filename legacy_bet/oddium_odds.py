@@ -25,7 +25,7 @@ class OddiumOddsEngine:
 
     Data is intentionally layered:
       1. football-data.co.uk public fixture market when a matching row exists.
-      2. football-data.org standings-derived statistical model.
+      2. 5Dollar standings-derived statistical model (football-data.org fallback).
       3. conservative neutral fallback when standings are temporarily unavailable.
 
     Oddium never presents these prices as a specific bookmaker quote.  The output is
@@ -221,7 +221,7 @@ class OddiumOddsEngine:
             source = f"Oddium Fusion • marché public + modèle ({market.books} source{'s' if market.books != 1 else ''})"
         else:
             p, confidence = model_p, model_conf
-            source = "Oddium Model • football-data.org"
+            source = "Oddium Model • classement 5Dollar/fallback"
 
         odds = self._to_odds(p)
         return OddiumQuote(

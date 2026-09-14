@@ -27,6 +27,15 @@ class Settings:
     propline_api_key: str = os.getenv("PROPLINE_API_KEY", "")
     # football-data.org: source gratuite pour calendriers / scores / classements.
     football_data_api_key: str = os.getenv("FOOTBALL_DATA_API_KEY", "")
+    # V12: source principale unique = 5DollarFootballAPI Pro.
+    # La clé reste uniquement dans Coolify/.env, jamais dans le dépôt Git.
+    five_dollar_api_key: str = os.getenv("FIVE_DOLLAR_FOOTBALL_API_KEY", os.getenv("FOOTBALL_API_KEY", ""))
+    five_dollar_poll_seconds: int = min(120, max(15, _int("FIVE_DOLLAR_POLL_SECONDS", 45)))
+    five_dollar_fixtures_cache_seconds: int = max(120, _int("FIVE_DOLLAR_FIXTURES_CACHE_SECONDS", 900))
+    # Anciens champs V11 conservés seulement pour compatibilité de configuration.
+    api_football_key: str = os.getenv("API_FOOTBALL_KEY", "")
+    rapidapi_key: str = os.getenv("RAPIDAPI_KEY", "")
+    api_football_poll_seconds: int = min(90, max(30, _int("API_FOOTBALL_POLL_SECONDS", 45)))
     # Ancien alias conserve pour compatibilite avec le reste du bot.
     odds_api_key: str = os.getenv("PROPLINE_API_KEY", "")
     guild_id: int | None = int(os.getenv("GUILD_ID")) if os.getenv("GUILD_ID") else None
@@ -36,7 +45,7 @@ class Settings:
     log_dir: str = os.getenv("LOG_DIR", "logs")
 
     propline_bookmakers: str = os.getenv("PROPLINE_BOOKMAKERS", "pinnacle,bovada,draftkings,fanduel,betmgm,unibet")
-    odds_bookmakers: str = "Oddium Fusion • marché public + modèle"
+    odds_bookmakers: str = "Bet365 • 5DollarFootballAPI Pro • secours Oddium Fusion"
     oddium_odds_margin_percent: int = _int("ODDIUM_ODDS_MARGIN_PERCENT", 6)
     use_propline_odds: bool = _bool("USE_PROPLINE_ODDS", False)
     currency_name: str = os.getenv("CURRENCY_NAME", "Gold")
@@ -75,11 +84,10 @@ class Settings:
     market_model_enabled: bool = _bool("MARKET_MODEL_ENABLED", True)
     market_model_history_years: int = _int("MARKET_MODEL_HISTORY_YEARS", 6)
 
-    # ODDIUM V8 — PropLine + cache intelligent.
-    # Free tier: 1000 requests/day. Discord never calls the API directly.
+    # Cache/rate settings inherited from older sources. Discord never calls providers directly.
     api_min_interval_seconds: int = _int("API_MIN_INTERVAL_SECONDS", 1)
     api_max_retries: int = _int("API_MAX_RETRIES", 2)
-    api_cache_dir: str = os.getenv("API_CACHE_DIR", "data/api_cache_propline")
+    api_cache_dir: str = os.getenv("API_CACHE_DIR", "data/api_cache")
     fixtures_cache_seconds: int = _int("FIXTURES_CACHE_SECONDS", 21600)   # 6h
     scores_cache_seconds: int = min(45, max(10, _int("SCORES_CACHE_SECONDS", 45)))   # cache < polling live
     live_panel_lookback_minutes: int = _int("LIVE_PANEL_LOOKBACK_MINUTES", 210)

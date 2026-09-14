@@ -17,6 +17,7 @@ class PanelManager:
     def __init__(self, bot: discord.Client, service: BettingService):
         self.bot = bot
         self.service = service
+        self._live_cleanup_done = False
 
     async def _state(self):
         active = await self.service.active_competitions()
@@ -77,66 +78,39 @@ class PanelManager:
             await self.ensure_panel(channel)
 
     async def build_live_embed(self) -> discord.Embed:
+        """Compact live board: one line group per match, no technical noise."""
         rows = await self.service.live_matches(25)
-        embed = discord.Embed(
-            title="🔴 MATCHS EN DIRECT",
-            description="⚡ **Oddium Live** — panneau piloté par notre WebSocket local. Sources gratuites redondantes : ESPN + Sofascore + FotMob + TheSportsDB. Cotes : Oddium Fusion.",
-            color=discord.Color.red(),
-        )
+        embed = discord.Embed(title="🔴 ODDIUM LIVE", color=discord.Color.red())
         if not rows:
-            embed.description += "\n\n⚽ **Aucun match en direct actuellement.**"
-        else:
-            paris = ZoneInfo("Europe/Paris")
-            blocks = []
-            for m in rows:
-                comp = COMPETITIONS.get(m["sport_key"], {})
-                emoji = comp.get("emoji", "⚽")
-                league = comp.get("name", m["competition_name"])
-                hs = "–" if m["home_score"] is None else str(m["home_score"])
-                aws = "–" if m["away_score"] is None else str(m["away_score"])
-                phase = str(m["live_phase"] or m["match_status"] or "live").lower()
-                clock = str(m["live_clock"] or "").strip()
-                labels = {
-                    "kickoff_wait": "🔴 COUP D’ENVOI • confirmation live…",
-                    "first_half": "🔴 1RE MI-TEMPS", "live": "🔴 EN DIRECT",
-                    "halftime": "⏸️ MI-TEMPS", "second_half": "🔴 2E MI-TEMPS",
-                    "extra_time": "⏱️ PROLONGATIONS", "penalties": "🎯 TIRS AU BUT",
-                    "suspended": "⏸️ SUSPENDU", "finished": "✅ TERMINÉ",
-                    "postponed": "📅 REPORTÉ", "cancelled": "❌ ANNULÉ",
-                }
-                status_label = labels.get(phase, "🔴 EN DIRECT")
-                if clock and phase not in {"halftime", "finished", "postponed", "cancelled"}:
-                    status_label += f" • {clock}"
-                detail = str(m["live_detail"] or "").strip()
-                detail_line = f"\n_{detail}_" if detail and detail.lower() not in status_label.lower() else ""
-                recent = await self.service.recent_live_events(str(m["event_id"]), 4)
-                timeline = []
-                for ev in reversed(recent):
-                    label = LIVE_EVENT_LABELS.get(str(ev["event_type"]), "🔴 Live")
-                    when = str(ev["clock"] or "").strip()
-                    score = ""
-                    if ev["home_score"] is not None and ev["away_score"] is not None:
-                        score = f" • {ev['home_score']}-{ev['away_score']}"
-                    timeline.append(f"`{when or '•'}` {label}{score}")
-                timeline_line = "\n" + "\n".join(timeline) if timeline else ""
-                blocks.append(
-                    f"{emoji} **{league}**  •  {status_label}\n"
-                    f"**{m['home_team']}  {hs} - {aws}  {m['away_team']}**{detail_line}{timeline_line}"
-                )
-            embed.description += "\n\n" + "\n\n".join(blocks)
-            # Discord embeds cap description at 4096 chars.
-            if len(embed.description) > 4000:
-                embed.description = embed.description[:3970] + "\n…"
+            embed.description = "⚽ **Aucun match en direct actuellement.**"
+            return embed
 
-        last = await self.service.db.get_setting("last_scores_refresh")
-        if last:
-            try:
-                dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
-                unix = int(dt.timestamp())
-                embed.set_footer(text="Oddium Live • événements complets : coup d’envoi, chrono, buts, mi-temps, reprise et fin")
-                embed.add_field(name="Dernier signal live", value=f"<t:{unix}:R>", inline=False)
-            except Exception:
-                pass
+        blocks = []
+        labels = {
+            "kickoff_wait": "🟠 DÉMARRAGE",
+            "first_half": "🔴 DIRECT", "live": "🔴 DIRECT",
+            "halftime": "⏸️ MI-TEMPS", "second_half": "🔴 DIRECT",
+            "extra_time": "⏱️ PROLONG.", "penalties": "🎯 T.A.B.",
+            "suspended": "⏸️ SUSPENDU", "finished": "✅ TERMINÉ",
+            "postponed": "📅 REPORTÉ", "cancelled": "❌ ANNULÉ",
+        }
+        for m in rows:
+            comp = COMPETITIONS.get(m["sport_key"], {})
+            emoji = comp.get("emoji", "⚽")
+            league = comp.get("name", m["competition_name"])
+            hs = "–" if m["home_score"] is None else str(m["home_score"])
+            aws = "–" if m["away_score"] is None else str(m["away_score"])
+            phase = str(m["live_phase"] or m["match_status"] or "live").lower()
+            status = labels.get(phase, "🔴 DIRECT")
+            clock = str(m["live_clock"] or "").strip()
+            if clock and phase not in {"halftime", "finished", "postponed", "cancelled"}:
+                status += f" • {clock}"
+            blocks.append(
+                f"{emoji} **{league}** · {status}\n"
+                f"**{m['home_team']}  {hs} - {aws}  {m['away_team']}**"
+            )
+        embed.description = "\n\n".join(blocks)
+        embed.set_footer(text="Sélectionne un match pour les événements et statistiques")
         return embed
 
     async def ensure_live_panel(self, channel: discord.TextChannel) -> discord.Message:
@@ -158,6 +132,20 @@ class PanelManager:
                 await msg.pin(reason="Panneau scores live Oddium")
         except discord.Forbidden:
             pass
+
+        # V11: repair old duplicate live panels. Keep the canonical message only.
+        # This runs best-effort and never blocks the live engine if history/delete
+        # permissions are missing.
+        if not self._live_cleanup_done:
+            try:
+                async for old_msg in channel.history(limit=60):
+                    if old_msg.id == msg.id or not self.bot.user or old_msg.author.id != self.bot.user.id:
+                        continue
+                    if any((e.title or "").upper() in {"🔴 MATCHS EN DIRECT", "🔴 ODDIUM LIVE"} for e in old_msg.embeds):
+                        await old_msg.delete(reason="Oddium V11: suppression panneau Live dupliqué")
+                self._live_cleanup_done = True
+            except (discord.Forbidden, discord.HTTPException):
+                pass
         return msg
 
     async def refresh_existing_live_panel(self):

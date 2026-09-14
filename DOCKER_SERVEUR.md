@@ -1,126 +1,55 @@
-# Oddium V9.1.2 — Installation Docker serveur
+# Oddium V12 — Installation Docker serveur
 
-Cette version conserve les données SQLite, les sauvegardes, le cache des données football et les logs hors du conteneur.
-Le redémarrage ou la reconstruction de l'image Docker ne supprime donc pas les paris.
+Oddium conserve SQLite, les sauvegardes, le cache football et les logs hors du conteneur. Une reconstruction Docker ne supprime donc pas les paris.
 
-## 1. Prérequis serveur
+## 1. Configuration
 
-Installer Docker Engine + Docker Compose plugin.
-Vérifier :
-
-```bash
-docker --version
-docker compose version
-```
-
-## 2. Envoyer le dossier sur le serveur
-
-Place tout le dossier Oddium sur le serveur, par exemple :
-
-```bash
-/opt/oddium
-```
-
-Puis :
-
-```bash
-cd /opt/oddium
-```
-
-## 3. Configurer .env
-
-Le fichier `.env` n'est volontairement PAS inclus dans l'image Docker.
-Sur le serveur, utilise ton `.env` actuel ou crée-le depuis `.env.example` :
+Copie l'exemple puis renseigne au minimum :
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-Renseigne au minimum :
-
 ```env
 DISCORD_TOKEN=TON_TOKEN_DISCORD
-FOOTBALL_DATA_API_KEY=TA_CLE_FOOTBALL_DATA
-# Optionnel : PROPLINE_API_KEY=
+FIVE_DOLLAR_FOOTBALL_API_KEY=TA_CLE_PRO_5DOLLAR
 GUILD_ID=ID_DE_TON_SERVEUR_DISCORD
 ```
 
-Ne publie jamais ce fichier.
+Variables utiles :
 
-## 4. Premier démarrage
+```env
+FIVE_DOLLAR_POLL_SECONDS=45
+FIVE_DOLLAR_FIXTURES_CACHE_SECONDS=900
+# Secours facultatif :
+FOOTBALL_DATA_API_KEY=
+```
+
+Ne publie jamais `.env` ni la clé 5Dollar.
+
+## 2. Démarrage
 
 ```bash
 docker compose up -d --build
-```
-
-Voir les logs :
-
-```bash
 docker compose logs -f oddium
 ```
 
-Tu dois notamment retrouver les lignes `Live scan ...`.
+Dans Discord, `/diagnostic_oddium` doit afficher **5DollarFootballAPI Pro : activée** après le premier appel réussi.
 
-## 5. Commandes utiles
-
-État :
-
-```bash
-docker compose ps
-```
-
-Redémarrer :
-
-```bash
-docker compose restart oddium
-```
-
-Arrêter :
-
-```bash
-docker compose down
-```
-
-Relancer après une mise à jour du code :
-
-```bash
-docker compose up -d --build
-```
-
-Logs récents :
-
-```bash
-docker compose logs --tail=200 oddium
-```
-
-## 6. Données persistantes
-
-Les dossiers suivants restent sur le serveur :
+## 3. Données persistantes
 
 - `./data/oddium.db` : base SQLite principale
 - `./data/backups/` : sauvegardes automatiques
-- `./data/api_cache_propline/` : cache API
+- `./data/api_cache/` : cache des sources football
 - `./logs/` : logs Oddium
 
-Ils sont montés dans le conteneur via `docker-compose.yml`.
+## 4. Mise à jour
 
-## 7. Aucun port public nécessaire
-
-Oddium est un bot Discord sortant. Le WebSocket Live `127.0.0.1:8765` reste interne au conteneur et ne doit pas être exposé à Internet.
-
-## 8. Mise à jour sans perdre la base
-
-Remplace les fichiers de code mais conserve les dossiers `data/`, `logs/` et ton `.env`, puis lance :
+Conserve `data/`, `logs/` et `.env`, remplace le code puis :
 
 ```bash
 docker compose up -d --build
 ```
 
-## 9. Vérifier la santé du conteneur
-
-```bash
-docker inspect --format='{{.State.Health.Status}}' oddium
-```
-
-Le healthcheck interroge le endpoint local Oddium Live `/health`.
+Le WebSocket Oddium reste local au conteneur (`127.0.0.1:8765`) : aucun port public n'est nécessaire.

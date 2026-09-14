@@ -172,11 +172,11 @@ async def admin_paris(interaction: discord.Interaction):
         color=discord.Color.dark_gold(),
     )
     embed.add_field(name="État", value="🔒 Suspendu" if paused else "🟢 Ouvert", inline=True)
-    embed.add_field(name="Cotes", value="Oddium Fusion • cotes calculées automatiquement", inline=True)
+    embed.add_field(name="Cotes", value="Bet365 • 5DollarFootballAPI Pro", inline=True)
     embed.add_field(name="Mises", value=f"{SETTINGS.min_stake} → {SETTINGS.max_stake} {SETTINGS.currency_name}", inline=True)
     embed.add_field(name="Matchs futurs", value=str(status["future_matches"]), inline=True)
     embed.add_field(name="Paris actifs", value=str(status["pending_bets"]), inline=True)
-    embed.add_field(name="Moteur", value="🟢 Free-first", inline=True)
+    embed.add_field(name="Moteur", value="🟢 5Dollar-first", inline=True)
     await interaction.response.send_message(embed=embed, view=AdminPanelView(service, active), ephemeral=True)
 
 
@@ -187,11 +187,15 @@ async def diagnostic_oddium(interaction: discord.Interaction):
     live_count = int(await db.get_setting("live_engine_visible_count") or 0)
     last_scan = await db.get_setting("live_engine_last_scan")
     embed = discord.Embed(
-        title="🩺 Diagnostic Oddium V10",
-        description="Architecture free-first • fixtures football-data.org • live multi-source • cotes Oddium Fusion",
+        title="🩺 Diagnostic Oddium V12",
+        description="5Dollar Engine • fixtures + Bet365 + live/events/stats • ESPN/Sofascore/FotMob/TheSportsDB en secours",
         color=discord.Color.green() if not status.get("last_error") else discord.Color.orange(),
     )
     embed.add_field(name="Live", value=f"Matchs visibles : **{live_count}**\nDernier scan : `{last_scan or '—'}`", inline=False)
+    five_enabled = bool(SETTINGS.five_dollar_api_key)
+    quota = status.get("five_dollar_remaining") or "?"
+    limit = status.get("five_dollar_limit") or "?"
+    embed.add_field(name="5DollarFootballAPI Pro", value=f"{'🟢 activée' if five_enabled else '⚪ clé absente'} • polling {SETTINGS.five_dollar_poll_seconds}s • quota {quota}/{limit}", inline=False)
     lines = []
     for d in status.get("diagnostics", []):
         lines.append(
@@ -225,7 +229,7 @@ async def engine_loop():
         result = await service.engine_refresh_odds_if_due()
         if result:
             updated, errors = result
-            log.info("Cotes Oddium actualisées: %s matchs, %s erreurs", updated, len(errors))
+            log.info("Cotes 5Dollar/Bet365 actualisées: %s matchs, %s erreurs", updated, len(errors))
             for err in errors:
                 log.error("Données football: %s", err)
     except Exception:

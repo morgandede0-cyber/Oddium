@@ -12,6 +12,8 @@ import aiohttp
 from config import SETTINGS
 from .constants import COMPETITIONS
 from .database import Database, utcnow_iso
+from .api_football import ApiFootballClient
+from .five_dollar import FiveDollarClient
 
 
 class OddsAPIError(RuntimeError):
@@ -19,13 +21,12 @@ class OddsAPIError(RuntimeError):
 
 
 class OddsAPI:
-    """ODDIUM V8 provider: PropLine.
+    """Oddium football provider hub.
 
-    - Fixtures: PropLine /events
-    - 1/N/2: PropLine bulk /odds?markets=h2h
-    - Scores/results: PropLine /scores (free tier)
-    - Discord interactions never call PropLine directly; they read SQLite.
-    - API responses are persisted to disk and survive bot restarts.
+    V12 routes canonical fixtures, live data, events, statistics and Bet365 1/N/2
+    through 5DollarFootballAPI Pro. The older providers below are deliberately kept
+    as resilience/legacy adapters; Discord interactions always read SQLite rather
+    than calling an external API directly.
     """
 
     BASE = "https://api.prop-line.com/v1"
@@ -151,6 +152,8 @@ class OddsAPI:
         self._fotmob_last_fetch_monotonic = 0.0
         self._sportsdb_rows: dict[str, list[dict]] = {}
         self._sportsdb_last_fetch: dict[str, float] = {}
+        self.api_football = ApiFootballClient(self._shared_session)
+        self.five_dollar = FiveDollarClient(self._shared_session)
 
     async def start(self):
         if not self.session or self.session.closed:
@@ -162,6 +165,28 @@ class OddsAPI:
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
+
+
+    async def _shared_session(self):
+        await self.start()
+        assert self.session is not None
+        return self.session
+
+    async def fetch_api_football_live(self, sport_key: str, *, force: bool = False):
+        """Optional Scoring-Returns-style live feed. Safe no-op without a key."""
+        return await self.api_football.live_shells(sport_key, force=force)
+
+    async def fetch_api_football_details(self, fixture_id: int, *, force: bool = False):
+        return await self.api_football.fixture_details(fixture_id, force=force)
+
+    async def fetch_five_dollar_live(self, sport_key: str, *, force: bool = False):
+        return await self.five_dollar.live_shells(sport_key, force=force)
+
+    async def fetch_five_dollar_fixtures(self, sport_key: str, *, force: bool = False):
+        return await self.five_dollar.fixture_shells(sport_key, force=force)
+
+    async def fetch_five_dollar_details(self, fixture_id: int, *, force: bool = False):
+        return await self.five_dollar.fixture_details(fixture_id, force=force)
 
     @staticmethod
     def _cache_key(path: str, params: dict | None) -> str:
@@ -358,10 +383,15 @@ class OddsAPI:
         return self.SPORT_KEYS[sport_key]
 
     async def selected_bookmakers(self, *, force: bool = False) -> list[str]:
-        return [f"PropLine • préférence: {SETTINGS.propline_bookmakers}"]
+        if SETTINGS.five_dollar_api_key:
+            return ["Bet365 • 5DollarFootballAPI Pro"]
+        return ["Oddium Fusion • secours"]
 
     async def fetch_events(self, sport_key: str, *, statuses: str = "pending,live", priority: bool = False):
-        # V9.1.3: calendriers gratuits via football-data.org pour les ligues Oddium.
+        # V12: 5Dollar Pro est la source canonique des calendriers et des cotes Bet365.
+        if SETTINGS.five_dollar_api_key and sport_key in self.five_dollar.LEAGUES:
+            return await self.fetch_five_dollar_fixtures(sport_key, force=priority)
+        # Secours: football-data.org pour les calendriers si 5Dollar est absent/indisponible.
         code = self.FOOTBALL_DATA_CODES.get(sport_key)
         if code and SETTINGS.football_data_api_key:
             now = datetime.now(timezone.utc)
@@ -1181,6 +1211,8 @@ class OddsAPI:
             "status": "pending",
             "home_score": None,
             "away_score": None,
+            "five_dollar_fixture_id": raw.get("five_dollar_fixture_id"),
+            "provider_odds": raw.get("provider_odds"),
         }
 
     @staticmethod
@@ -1237,6 +1269,11 @@ class OddsAPI:
             "period": raw.get("period"),
             "status_detail": raw.get("status_detail") or raw.get("detail"),
             "source": raw.get("source") or "PropLine",
+            "provider_events": raw.get("provider_events") or [],
+            "api_football_fixture_id": raw.get("api_football_fixture_id"),
+            "five_dollar_fixture_id": raw.get("five_dollar_fixture_id"),
+            "provider_odds": raw.get("provider_odds"),
+            "provider_stats": raw.get("provider_stats") or {},
         }
 
     @staticmethod
@@ -1324,6 +1361,16 @@ class OddsAPI:
         return await self.fetch_events(sport_key)
 
     async def fetch_standings(self, sport_key: str, *, season: int | None = None, force: bool = False):
+        # V12: use the paid 5Dollar feed first so the odds fallback model remains
+        # self-contained around the user's Pro subscription. football-data.org is
+        # retained only as a resilience source.
+        if SETTINGS.five_dollar_api_key:
+            try:
+                payload = await self.five_dollar.standings(sport_key, season=season)
+                if payload:
+                    return payload
+            except Exception:
+                pass
         code = self.FOOTBALL_DATA_CODES.get(sport_key)
         if not code or not SETTINGS.football_data_api_key:
             return {}

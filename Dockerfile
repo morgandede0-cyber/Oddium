@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DB_PATH=/app/data/oddium.db \
     BACKUP_DIR=/app/data/backups \
     LOG_DIR=/app/logs \
-    API_CACHE_DIR=/app/data/api_cache_propline \
+    API_CACHE_DIR=/app/data/api_cache \
     LIVE_WS_HOST=127.0.0.1 \
     LIVE_WS_PORT=8765 \
     LIVE_WS_PATH=/live
@@ -24,7 +24,7 @@ RUN python -m pip install --upgrade pip \
 
 COPY . .
 
-RUN mkdir -p /app/data/backups /app/data/api_cache_propline /app/logs
+RUN mkdir -p /app/data/backups /app/data/api_cache /app/logs
 
 # Le websocket Oddium reste uniquement interne au conteneur.
 # Coolify peut quand même contrôler l'état du bot grâce à /health.

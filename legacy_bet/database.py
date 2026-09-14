@@ -219,6 +219,8 @@ class Database:
             await self._ensure_column(db, "matches", "live_clock", "TEXT")
             await self._ensure_column(db, "matches", "live_detail", "TEXT")
             await self._ensure_column(db, "matches", "live_source", "TEXT")
+            await self._ensure_column(db, "matches", "api_football_fixture_id", "INTEGER")
+            await self._ensure_column(db, "matches", "five_dollar_fixture_id", "INTEGER")
             await self._ensure_column(db, "bets", "settlement_note", "TEXT")
             await db.commit()
 

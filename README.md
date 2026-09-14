@@ -1,40 +1,32 @@
-# ODDIUM V10 — FREE-FIRST
+# Oddium V12 — 5Dollar Engine
 
-Bot Discord de paris football **virtuels** avec calendrier, scores live, suivi de matchs, économie, paris simples/combinés et cotes calculées automatiquement.
+Bot Discord de paris football virtuels avec cotes Bet365, live-score, événements, statistiques, favoris, combinés, classements et économie Gold.
 
-## Compétitions
-- Ligue 1
-- Premier League
-- La Liga
-- Bundesliga
-- Serie A
-- Ligue des Champions
+## Architecture
 
-## Architecture des données
+**5DollarFootballAPI Pro** est la source principale : fixtures, live, timeline, statistiques et cotes Bet365. Oddium mutualise le flux live global et le met en cache pour respecter le quota Pro. ESPN, Sofascore, FotMob, TheSportsDB et livescoreFootball restent des secours live. football-data.org et le moteur Oddium Fusion restent des secours calendrier/cotation.
 
-- **football-data.org** : calendrier canonique, résultats et classements.
-- **ESPN + Sofascore + FotMob + TheSportsDB** : live redondant et détection des changements de statut.
-- **football-data.co.uk** : consensus de marché public quand disponible.
-- **Oddium Fusion** : moteur 1/N/2 qui combine le consensus public avec un modèle Poisson basé sur les forces offensives/défensives et le classement.
-- **SQLite** : source locale de vérité pour l'interface Discord et les paris.
+## Configuration minimale
 
-Oddium ne dépend plus d'une API de cotes payante pour fonctionner. `PROPLINE_API_KEY` reste optionnelle uniquement pour compatibilité avec les anciennes versions.
+```env
+DISCORD_TOKEN=...
+FIVE_DOLLAR_FOOTBALL_API_KEY=...
+```
 
-## Live V10
+Recommandé :
 
-Le match apparaît dans le panneau dès son heure officielle de coup d'envoi avec l'état **confirmation live en attente**. Dès qu'un fournisseur confirme le direct, son statut, son chrono et son score remplacent immédiatement l'état provisoire.
+```env
+FIVE_DOLLAR_POLL_SECONDS=45
+FOOTBALL_DATA_API_KEY=...
+GUILD_ID=...
+```
 
-Les observations de plusieurs fournisseurs sont triées pour empêcher une source lente en `pending` de faire disparaître un match déjà confirmé `live` par ESPN/Sofascore.
+La clé 5Dollar doit être ajoutée dans Coolify ou `.env`, jamais dans Git.
 
-## Installation locale
-1. Lance `INSTALLER.bat`.
-2. Copie `.env.example` en `.env`.
-3. Renseigne au minimum `DISCORD_TOKEN=` et `FOOTBALL_DATA_API_KEY=`.
-4. Lance `DEMARRER.bat`.
-5. Sur Discord : `/setup` puis, si tu veux un panneau live séparé, `/setup_live`.
+## Démarrage
 
-## GitHub
+Docker/Coolify : utiliser `Dockerfile` ou `docker-compose.coolify.yml`.
 
-`PUSH_ODDIUM_GITHUB.bat` refuse de pousser si la racine Git n'est pas exactement le dossier Oddium ou si `origin` ne ressemble pas à un dépôt Oddium. Cela évite d'envoyer par erreur `AppData`, `Documents` ou le dépôt Legacy.
+Commandes principales : `/setup`, `/setup_live`, `/diagnostic_oddium`, `/admin_paris`.
 
-Ne partage jamais ton token Discord ni ta clé football-data.org.
+Voir `V12_5DOLLAR_ENGINE.md` pour le détail de la V12.

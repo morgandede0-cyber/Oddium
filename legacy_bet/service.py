@@ -42,9 +42,11 @@ class BettingService:
         await self.db.log_admin(admin_id, "SET_COMPETITIONS", ", ".join(valid))
 
     async def refresh_events(self, *, priority: bool = False) -> tuple[int, list[dict], list[str]]:
-        """Discover upcoming fixtures from PropLine.
+        """Discover upcoming fixtures, with 5Dollar Pro as the canonical source.
 
-        Cached for hours: Discord users never trigger this endpoint themselves.
+        Provider ids are stored separately from Oddium event ids so an existing V10/V11
+        database migrates without duplicating the same match. 5Dollar's batch fixture
+        response also carries Bet365 1X2 prices, which are persisted immediately.
         """
         active = await self.active_competitions()
         discovered = 0
@@ -60,31 +62,73 @@ class BettingService:
                     if not event:
                         continue
                     discovered += 1
-                    await self.db.execute(
-                        """INSERT INTO matches(event_id,sport_key,competition_name,home_team,away_team,home_team_id,away_team_id,commence_time,
-                              odds_available,completed,cancelled,home_score,away_score,last_score_update,first_seen_at,last_seen_at)
-                           VALUES(?,?,?,?,?,?,?,?,0,0,0,NULL,NULL,NULL,?,?)
-                           ON CONFLICT(event_id) DO UPDATE SET
-                              sport_key=excluded.sport_key, competition_name=excluded.competition_name,
-                              home_team=excluded.home_team, away_team=excluded.away_team,
-                              home_team_id=COALESCE(excluded.home_team_id,matches.home_team_id),
-                              away_team_id=COALESCE(excluded.away_team_id,matches.away_team_id),
-                              commence_time=excluded.commence_time,last_seen_at=excluded.last_seen_at""",
-                        (event["event_id"], key, event["competition_name"], event["home_team"], event["away_team"],
-                         event.get("home_team_id"), event.get("away_team_id"), event["commence_time"], now_iso, now_iso),
-                    )
+                    event_id = str(event["event_id"])
+                    five_id = event.get("five_dollar_fixture_id")
+
+                    # Migration/dedup: reuse an older fd:/af: row if teams and kickoff match.
+                    target_id = event_id
+                    existing = await self.db.fetchone("SELECT event_id FROM matches WHERE event_id=?", (event_id,))
+                    if existing is None and event.get("home_team") and event.get("away_team"):
+                        try:
+                            kickoff = parse_iso(str(event["commence_time"]))
+                            lo = (kickoff - timedelta(hours=3)).isoformat()
+                            hi = (kickoff + timedelta(hours=3)).isoformat()
+                            candidates = await self.db.fetchall(
+                                "SELECT event_id,home_team,away_team FROM matches WHERE sport_key=? AND commence_time BETWEEN ? AND ?",
+                                (key, lo, hi),
+                            )
+                            hn = self.odds_api._norm(event.get("home_team")); an = self.odds_api._norm(event.get("away_team"))
+                            for cand in candidates:
+                                if self.odds_api._norm(cand["home_team"]) == hn and self.odds_api._norm(cand["away_team"]) == an:
+                                    target_id = str(cand["event_id"]); existing = cand; break
+                        except Exception:
+                            pass
+
+                    provider_odds = event.get("provider_odds") or {}
+                    hodd = provider_odds.get("home_odd")
+                    dodd = provider_odds.get("draw_odd")
+                    aodd = provider_odds.get("away_odd")
+                    bookmaker = provider_odds.get("bookmaker")
+                    odds_ts = provider_odds.get("last_odds_update") or now_iso
+                    odds_available = 1 if all(x is not None for x in (hodd,dodd,aodd)) else 0
+
+                    if existing is None:
+                        await self.db.execute(
+                            """INSERT INTO matches(event_id,sport_key,competition_name,home_team,away_team,home_team_id,away_team_id,commence_time,
+                                  home_odd,draw_odd,away_odd,bookmaker,last_odds_update,odds_available,completed,cancelled,home_score,away_score,
+                                  five_dollar_fixture_id,last_score_update,first_seen_at,last_seen_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,NULL,NULL,?,NULL,?,?)""",
+                            (target_id, key, event["competition_name"], event["home_team"], event["away_team"],
+                             event.get("home_team_id"), event.get("away_team_id"), event["commence_time"],
+                             hodd,dodd,aodd,bookmaker,odds_ts,odds_available,five_id,now_iso,now_iso),
+                        )
+                    else:
+                        old = await self.db.fetchone("SELECT home_odd,draw_odd,away_odd FROM matches WHERE event_id=?", (target_id,))
+                        await self.db.execute(
+                            """UPDATE matches SET sport_key=?,competition_name=?,home_team=?,away_team=?,
+                               home_team_id=COALESCE(?,home_team_id),away_team_id=COALESCE(?,away_team_id),commence_time=?,
+                               five_dollar_fixture_id=COALESCE(?,five_dollar_fixture_id),last_seen_at=?,
+                               home_odd=COALESCE(?,home_odd),draw_odd=COALESCE(?,draw_odd),away_odd=COALESCE(?,away_odd),
+                               bookmaker=COALESCE(?,bookmaker),last_odds_update=CASE WHEN ?=1 THEN ? ELSE last_odds_update END,
+                               odds_available=CASE WHEN ?=1 THEN 1 ELSE odds_available END WHERE event_id=?""",
+                            (key,event["competition_name"],event["home_team"],event["away_team"],event.get("home_team_id"),event.get("away_team_id"),
+                             event["commence_time"],five_id,now_iso,hodd,dodd,aodd,bookmaker,odds_available,odds_ts,odds_available,target_id),
+                        )
+                        if odds_available and old and (old["home_odd"],old["draw_odd"],old["away_odd"]) != (hodd,dodd,aodd):
+                            await self.db.execute(
+                                "INSERT INTO odds_history(event_id,home_odd,draw_odd,away_odd,bookmaker,captured_at) VALUES(?,?,?,?,?,?)",
+                                (target_id,hodd,dodd,aodd,bookmaker,now_iso),
+                            )
             except Exception as exc:
                 errors.append(f"{COMPETITIONS.get(key, {}).get('name', key)}: {exc}")
         self._last_events_refresh = datetime.now(timezone.utc)
         return discovered, settlements, errors
 
     async def refresh_odds(self, *, priority: bool = False, discover: bool = True) -> tuple[int, list[str]]:
-        """Generate Oddium 1/X/2 prices without a paid odds API.
+        """Refresh real Bet365 prices from 5Dollar Pro, then fall back to Oddium Fusion.
 
-        Fixtures are canonical football-data.org rows.  Prices are produced by the
-        Oddium Fusion engine: public football-data.co.uk consensus when available,
-        blended with a standings/Poisson model.  This deliberately avoids creating a
-        second PropLine event id for the same fixture.
+        One batch fixture-list call per competition provides every upcoming 1/X/2
+        board. No per-match odds loop is used, keeping the Pro quota predictable.
         """
         errors: list[str] = []
         if discover:
@@ -99,44 +143,67 @@ class BettingService:
 
         for key in active:
             try:
+                five_map: dict[int, dict] = {}
+                if SETTINGS.five_dollar_api_key:
+                    try:
+                        raws = await self.odds_api.fetch_five_dollar_fixtures(key, force=priority)
+                        for raw in raws or []:
+                            fid = raw.get("five_dollar_fixture_id")
+                            quote = raw.get("provider_odds") or {}
+                            if fid is not None and quote:
+                                five_map[int(fid)] = quote
+                    except Exception as exc:
+                        errors.append(f"5Dollar {COMPETITIONS.get(key, {}).get('name', key)}: {exc}")
+
                 rows = await self.db.fetchall(
-                    """SELECT * FROM matches
-                       WHERE sport_key=? AND completed=0 AND cancelled=0
-                         AND commence_time>=? AND commence_time<=?
-                       ORDER BY commence_time ASC""",
+                    """SELECT * FROM matches WHERE sport_key=? AND completed=0 AND cancelled=0
+                       AND commence_time>=? AND commence_time<=? ORDER BY commence_time ASC""",
                     (key, now.isoformat(), horizon.isoformat()),
                 )
                 parsed_count = 0
+                provider_count = 0
+                model_count = 0
                 for match in rows:
-                    try:
-                        quote = await self.odds_engine.quote(key, str(match["home_team"]), str(match["away_team"]))
-                    except Exception as exc:
-                        errors.append(f"{match['home_team']} - {match['away_team']}: {exc}")
-                        continue
+                    quote = None
+                    fid = match["five_dollar_fixture_id"] if "five_dollar_fixture_id" in match.keys() else None
+                    if fid is not None:
+                        quote = five_map.get(int(fid))
+                    if quote:
+                        home_odd=float(quote["home_odd"]); draw_odd=float(quote["draw_odd"]); away_odd=float(quote["away_odd"])
+                        bookmaker=str(quote.get("bookmaker") or "Bet365 • 5DollarFootballAPI")
+                        quote_ts=str(quote.get("last_odds_update") or seen_now)
+                        provider_count += 1
+                    else:
+                        try:
+                            model = await self.odds_engine.quote(key, str(match["home_team"]), str(match["away_team"]))
+                            home_odd,draw_odd,away_odd=model.home_odd,model.draw_odd,model.away_odd
+                            bookmaker=f"{model.source} • secours"
+                            quote_ts=model.last_odds_update
+                            model_count += 1
+                        except Exception as exc:
+                            errors.append(f"{match['home_team']} - {match['away_team']}: {exc}")
+                            continue
 
-                    old = (match["home_odd"], match["draw_odd"], match["away_odd"])
+                    old=(match["home_odd"],match["draw_odd"],match["away_odd"])
                     await self.db.execute(
-                        """UPDATE matches SET home_odd=?,draw_odd=?,away_odd=?,bookmaker=?,
-                           last_odds_update=?,odds_available=1,last_seen_at=? WHERE event_id=?""",
-                        (quote.home_odd, quote.draw_odd, quote.away_odd, quote.source,
-                         quote.last_odds_update, seen_now, str(match["event_id"])),
+                        """UPDATE matches SET home_odd=?,draw_odd=?,away_odd=?,bookmaker=?,last_odds_update=?,
+                           odds_available=1,last_seen_at=? WHERE event_id=?""",
+                        (home_odd,draw_odd,away_odd,bookmaker,quote_ts,seen_now,str(match["event_id"])),
                     )
                     changed = old[0] is None or any(
-                        abs(float(prev) - float(cur)) > 0.0001
-                        for prev, cur in zip(old, (quote.home_odd, quote.draw_odd, quote.away_odd))
-                        if prev is not None
+                        prev is None or abs(float(prev)-float(cur)) > 0.0001
+                        for prev,cur in zip(old,(home_odd,draw_odd,away_odd))
                     )
                     if changed:
                         await self.db.execute(
                             "INSERT INTO odds_history(event_id,home_odd,draw_odd,away_odd,bookmaker,captured_at) VALUES(?,?,?,?,?,?)",
-                            (str(match["event_id"]), quote.home_odd, quote.draw_odd, quote.away_odd, quote.source, seen_now),
+                            (str(match["event_id"]),home_odd,draw_odd,away_odd,bookmaker,seen_now),
                         )
-                    parsed_count += 1
-                    updated += 1
+                    parsed_count += 1; updated += 1
 
                 await self.db.set_setting(f"diag_odds_{key}", len(rows))
                 await self.db.set_setting(f"diag_parsed_{key}", parsed_count)
-                await self.db.set_setting(f"diag_odds_source_{key}", "Oddium Fusion")
+                await self.db.set_setting(f"diag_odds_source_{key}", f"5Dollar/Bet365={provider_count} • Fusion={model_count}")
             except Exception as exc:
                 errors.append(f"{COMPETITIONS.get(key, {}).get('name', key)}: {exc}")
 
@@ -228,7 +295,7 @@ class BettingService:
         source_rank = {
             "thesportsdb": 1, "livescorefootball": 2, "fotmob": 3,
             "espn": 4, "sofascore": 5, "sofascore live": 6,
-            "football-data.org": 3,
+            "football-data.org": 3, "api-football": 8, "5dollarfootballapi": 12,
         }
         def key(raw: dict):
             parsed = self.odds_api.parse_score_shell(raw, sport_key) or {}
@@ -243,8 +310,8 @@ class BettingService:
         - Pending bets near kickoff always trigger a competition score refresh.
         - If the live panel is installed, competitions with a match inside the live
           window are also refreshed, even when nobody has bet on them.
-        - PropLine responses are cached, so repeated loop ticks do not create extra
-          requests inside SCORES_CACHE_SECONDS.
+        - 5Dollar is globally cached, so six competition filters share one live
+          request inside FIVE_DOLLAR_POLL_SECONDS.
         """
         active = await self.active_competitions()
         score_updates = 0
@@ -338,6 +405,11 @@ class BettingService:
                     logging.getLogger("oddium").info("Live scan démarré: %s", COMPETITIONS.get(key, {}).get("name", key))
                 except Exception:
                     pass
+                five_dollar_task = _safe_live_call(
+                    "5DollarFootballAPI",
+                    self.odds_api.fetch_five_dollar_live(key, force=force_api or discovery_due),
+                    10.0,
+                )
                 open_task = _safe_live_call(
                     "livescoreFootball",
                     self.odds_api.fetch_open_source_scores(key, force=force_api or discovery_due),
@@ -363,8 +435,8 @@ class BettingService:
                     self.odds_api.fetch_thesportsdb_scores(key, force=force_api or discovery_due),
                     6.0,
                 )
-                open_rows, espn_rows, sofa_live_rows, fotmob_rows, sportsdb_rows = await asyncio.gather(
-                    open_task, espn_task, sofa_task, fotmob_task, sportsdb_task
+                five_dollar_rows, open_rows, espn_rows, sofa_live_rows, fotmob_rows, sportsdb_rows = await asyncio.gather(
+                    five_dollar_task, open_task, espn_task, sofa_task, fotmob_task, sportsdb_task
                 )
 
                 sofa_rows = []
@@ -375,8 +447,10 @@ class BettingService:
                         6.0,
                     )
 
-                raws = list(open_rows or []) + list(espn_rows or []) + list(fotmob_rows or []) + list(sportsdb_rows or []) + list(sofa_rows or []) + list(sofa_live_rows or [])
+                raws = list(open_rows or []) + list(espn_rows or []) + list(fotmob_rows or []) + list(sportsdb_rows or []) + list(sofa_rows or []) + list(sofa_live_rows or []) + list(five_dollar_rows or [])
                 sources = []
+                if five_dollar_rows:
+                    sources.append("5Dollar")
                 if open_rows:
                     sources.append("livescoreFootball")
                 if espn_rows:
@@ -394,9 +468,9 @@ class BettingService:
                     import logging
                     _log = logging.getLogger("oddium")
                     _log.info(
-                        "Live scan %s: livescoreFootball=%s | ESPN=%s | FotMob=%s | TheSportsDB=%s | SofascoreLive=%s | SofascoreDay=%s | total=%s",
+                        "Live scan %s: 5Dollar=%s | livescoreFootball=%s | ESPN=%s | FotMob=%s | TheSportsDB=%s | SofascoreLive=%s | SofascoreDay=%s | total=%s",
                         COMPETITIONS.get(key, {}).get("name", key),
-                        len(open_rows or []), len(espn_rows or []), len(fotmob_rows or []), len(sportsdb_rows or []),
+                        len(five_dollar_rows or []), len(open_rows or []), len(espn_rows or []), len(fotmob_rows or []), len(sportsdb_rows or []),
                         len(sofa_live_rows or []), len(sofa_rows or []),
                         len(raws or []),
                     )
@@ -467,12 +541,12 @@ class BettingService:
                         newly_inserted = True
                         await self.db.execute(
                             """INSERT INTO matches(event_id,sport_key,competition_name,home_team,away_team,home_team_id,away_team_id,commence_time,
-                                   odds_available,completed,cancelled,home_score,away_score,match_status,live_phase,live_clock,live_detail,live_source,last_score_update,first_seen_at,last_seen_at)
-                               VALUES(?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?,?,?,?)""",
+                                   odds_available,completed,cancelled,home_score,away_score,match_status,live_phase,live_clock,live_detail,live_source,api_football_fixture_id,five_dollar_fixture_id,last_score_update,first_seen_at,last_seen_at)
+                               VALUES(?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?,?,?,?,?,?)""",
                             (provider_event_id, key, COMPETITIONS.get(key, {}).get("name", key), event["home_team"], event["away_team"],
                              event.get("home_team_id"), event.get("away_team_id"), event["commence_time"],
                              int(hs) if hs is not None else None, int(aws) if aws is not None else None, status, status,
-                             event.get("live_clock"), event.get("status_detail"), event.get("source"),
+                             event.get("live_clock"), event.get("status_detail"), event.get("source"), event.get("api_football_fixture_id"), event.get("five_dollar_fixture_id"),
                              utcnow_iso(), utcnow_iso(), utcnow_iso()),
                         )
                         target_event_id = provider_event_id
@@ -508,10 +582,13 @@ class BettingService:
                         """UPDATE matches SET home_score=COALESCE(?,home_score),away_score=COALESCE(?,away_score),
                            last_score_update=CASE WHEN ?=1 THEN ? ELSE last_score_update END,
                            match_status=?,live_phase=?,live_clock=?,live_detail=?,live_source=?,completed=?,cancelled=?,
-                           home_team_id=COALESCE(?,home_team_id),away_team_id=COALESCE(?,away_team_id)
+                           home_team_id=COALESCE(?,home_team_id),away_team_id=COALESCE(?,away_team_id),
+                           api_football_fixture_id=COALESCE(?,api_football_fixture_id),
+                           five_dollar_fixture_id=COALESCE(?,five_dollar_fixture_id)
                            WHERE event_id=?""",
                         (hs_i, aws_i, 1 if changed else 0, signal_ts, status, new_phase, new_clock or None, new_detail or None,
-                         event.get("source"), completed, cancelled, event.get("home_team_id"), event.get("away_team_id"), target_event_id),
+                         event.get("source"), completed, cancelled, event.get("home_team_id"), event.get("away_team_id"),
+                         event.get("api_football_fixture_id"), event.get("five_dollar_fixture_id"), target_event_id),
                     )
                     if changed:
                         score_updates += 1
@@ -528,13 +605,44 @@ class BettingService:
                             }.get(new_phase, "phase_change")
                         elif clock_changed:
                             event_type = "clock_update"
+
+                        # Si 5Dollar fournit le but précis, on évite le doublon
+                        # "score modifié" + "but" dans les DM/timelines.
+                        has_precise_goal = score_changed and any(
+                            str(x.get("type") or "") == "goal" for x in (event.get("provider_events") or [])
+                        )
+                        if not has_precise_goal or event_type in {"match_finished", "halftime", "second_half_started"}:
+                            live_events.append({
+                                "type": event_type, "event_id": target_event_id,
+                                "home_team": event.get("home_team") or old["home_team"], "away_team": event.get("away_team") or old["away_team"],
+                                "home_score": hs_i if hs_i is not None else old["home_score"],
+                                "away_score": aws_i if aws_i is not None else old["away_score"],
+                                "phase": new_phase, "previous_phase": old_phase, "clock": new_clock or None,
+                                "detail": new_detail or None, "source": event.get("source"),
+                            })
+
+                    # Scoring-Returns style event stream: goals, VAR and cards are
+                    # persisted once and then pushed through Oddium's WebSocket/DM layer.
+                    for pev in event.get("provider_events") or []:
+                        ptype = str(pev.get("type") or "")
+                        pclock = str(pev.get("clock") or "")
+                        pdetail = str(pev.get("detail") or "")
+                        if not ptype:
+                            continue
+                        seen = await self.db.fetchone(
+                            "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND COALESCE(clock,'')=? AND COALESCE(detail,'')=? LIMIT 1",
+                            (target_event_id, ptype, pclock, pdetail),
+                        )
+                        if seen:
+                            continue
                         live_events.append({
-                            "type": event_type, "event_id": target_event_id,
-                            "home_team": event.get("home_team") or old["home_team"], "away_team": event.get("away_team") or old["away_team"],
+                            "type": ptype, "event_id": target_event_id,
+                            "home_team": event.get("home_team") or old["home_team"],
+                            "away_team": event.get("away_team") or old["away_team"],
                             "home_score": hs_i if hs_i is not None else old["home_score"],
                             "away_score": aws_i if aws_i is not None else old["away_score"],
-                            "phase": new_phase, "previous_phase": old_phase, "clock": new_clock or None,
-                            "detail": new_detail or None, "source": event.get("source"),
+                            "phase": new_phase, "clock": pclock or new_clock or None,
+                            "detail": pdetail or None, "source": event.get("source") or "5DollarFootballAPI",
                         })
 
                     if status in {"cancelled", "postponed"}:
@@ -558,6 +666,30 @@ class BettingService:
         self.last_scores_refresh = datetime.now(timezone.utc)
         await self.db.set_setting("last_scores_refresh", self.last_scores_refresh.isoformat())
         return score_updates, settlements, errors
+
+    async def live_match_details(self, event_id: str) -> dict:
+        match = await self.db.fetchone("SELECT * FROM matches WHERE event_id=?", (event_id,))
+        if not match:
+            return {}
+        recent = await self.db.fetchall(
+            "SELECT * FROM live_events WHERE event_id=? AND event_type!='clock_update' ORDER BY id DESC LIMIT 20",
+            (event_id,),
+        )
+        external = {}
+        five_id = match["five_dollar_fixture_id"] if "five_dollar_fixture_id" in match.keys() else None
+        if five_id:
+            try:
+                external = await self.odds_api.fetch_five_dollar_details(int(five_id))
+            except Exception:
+                external = {}
+        if not external:
+            fixture_id = match["api_football_fixture_id"] if "api_football_fixture_id" in match.keys() else None
+            if fixture_id and (SETTINGS.api_football_key or SETTINGS.rapidapi_key):
+                try:
+                    external = await self.odds_api.fetch_api_football_details(int(fixture_id))
+                except Exception:
+                    external = {}
+        return {"match": match, "events": list(reversed(recent)), "external": external}
 
     async def live_matches(self, limit: int = 25):
         """Rows displayed by the permanent live-score panel."""
@@ -617,6 +749,13 @@ class BettingService:
 
     async def followers_for_event(self, event_id: str):
         return await self.db.fetchall("SELECT user_id FROM match_follows WHERE event_id=?", (event_id,))
+
+    async def followed_matches(self, user_id: int, limit: int = 25):
+        return await self.db.fetchall(
+            """SELECT m.* FROM match_follows f JOIN matches m ON m.event_id=f.event_id
+               WHERE f.user_id=? ORDER BY m.commence_time DESC LIMIT ?""",
+            (user_id, limit),
+        )
 
     async def user_live_bets(self, user_id: int, limit: int = 10):
         return await self.db.fetchall(
@@ -1032,11 +1171,15 @@ class BettingService:
             selected_books = []
             if not self.odds_api.last_error:
                 self.odds_api.last_error = str(exc)
+        five = self.odds_api.five_dollar
         return {
-            "remaining": remaining_api,
+            "remaining": five.rate_limit_remaining if SETTINGS.five_dollar_api_key else remaining_api,
             "used": used_api,
-            "last_status": self.odds_api.last_status,
-            "last_error": self.odds_api.last_error or self.last_error,
+            "last_status": five.last_status if SETTINGS.five_dollar_api_key else self.odds_api.last_status,
+            "last_error": five.last_error or self.odds_api.last_error or self.last_error,
+            "five_dollar_enabled": bool(SETTINGS.five_dollar_api_key),
+            "five_dollar_remaining": five.rate_limit_remaining,
+            "five_dollar_limit": five.rate_limit_limit,
             "pending_bets": int(pending["c"] if pending else 0),
             "future_matches": int(matches["c"] if matches else 0),
             "diagnostics": diagnostics,

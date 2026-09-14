@@ -77,7 +77,7 @@ async def build_main_carousel_embed(service: BettingService, active: list[str], 
         embed.add_field(name="Matchs disponibles", value="Aucun pour le moment", inline=False)
     if selected_key in CAROUSEL_ASSETS:
         embed.set_image(url=f"attachment://{CAROUSEL_ASSETS[selected_key]}")
-    embed.set_footer(text="ODDIUM • Cotes Oddium • 1 = domicile • N = nul • 2 = extérieur")
+    embed.set_footer(text="ODDIUM • Bet365 via 5Dollar • 1 = domicile • N = nul • 2 = extérieur")
     return embed
 
 
@@ -448,7 +448,7 @@ async def build_league_embed(service: BettingService, sport_key: str, matches) -
             lines.append(f"**{local.strftime('%H:%M')} • {m['home_team']} — {m['away_team']}**\n{odds}")
         embed.add_field(name=f"📅 {title}", value="\n\n".join(lines), inline=False)
 
-    embed.set_footer(text=f"{len(matches)} match(s) • 1 = domicile • N = nul • 2 = extérieur • Cotes Oddium")
+    embed.set_footer(text=f"{len(matches)} match(s) • 1 = domicile • N = nul • 2 = extérieur • Cotes Bet365")
     return embed
 
 
@@ -709,7 +709,7 @@ class AdminPanelView(discord.ui.View):
     async def health(self, interaction: discord.Interaction, button: discord.ui.Button):
         s = await self.service.api_status()
         embed = discord.Embed(title="🩺 État Oddium", color=discord.Color.green() if not s["last_error"] else discord.Color.orange())
-        embed.add_field(name="Données football", value=f"football-data.org HTTP {s['last_status'] or '?'}\nMoteur cotes : Oddium Fusion\nLive : ESPN + Sofascore + FotMob", inline=True)
+        embed.add_field(name="Données football", value=f"5Dollar HTTP {s['last_status'] or '?'}\nCotes : Bet365 • secours Oddium Fusion\nLive : 5Dollar + ESPN/Sofascore/FotMob", inline=True)
         embed.add_field(name="Activité", value=f"Matchs futurs: {s['future_matches']}\nParis en cours: {s['pending_bets']}", inline=True)
         diag_lines = [
             f"**{d['name']}** — fixtures `{d['events']}` • cotes `{d['parsed']}` • live `{d.get('live_rows',0)}`\n↳ {d.get('live_source','—')}"
@@ -743,6 +743,10 @@ class AdminPanelView(discord.ui.View):
 
 LIVE_EVENT_LABELS = {
     "match_started": "🟢 Coup d’envoi", "goal_or_score": "⚽ Score modifié",
+    "goal": "⚽ But", "var": "📺 VAR", "yellow_card": "🟨 Carton jaune",
+    "red_card": "🟥 Carton rouge", "card": "🟨 Carton",
+    "penalty_missed": "❌ Penalty manqué", "substitution": "🔁 Remplacement",
+    "corner": "🚩 Corner", "period_score": "📌 Score de période",
     "halftime": "⏸️ Mi-temps", "second_half_started": "▶️ Reprise",
     "extra_time_started": "⏱️ Prolongations", "penalties_started": "🎯 Tirs au but",
     "match_suspended": "⏸️ Match suspendu", "match_postponed": "📅 Match reporté",
@@ -769,11 +773,98 @@ class LiveFollowSelectView(discord.ui.View):
     def __init__(self, service, matches, followed):
         super().__init__(timeout=90); self.add_item(LiveFollowSelect(service,matches,followed))
 
+class LiveDetailsSelect(discord.ui.Select):
+    def __init__(self, service: BettingService, matches):
+        options = []
+        for m in matches[:25]:
+            hs = "–" if m["home_score"] is None else str(m["home_score"])
+            aws = "–" if m["away_score"] is None else str(m["away_score"])
+            clock = str(m["live_clock"] or m["live_phase"] or "Live")
+            options.append(discord.SelectOption(
+                label=f"{m['home_team']} - {m['away_team']}"[:100],
+                description=f"{hs}-{aws} • {clock}"[:100], value=str(m["event_id"]), emoji="📊"))
+        super().__init__(placeholder="📊 Choisis un match…", options=options, min_values=1, max_values=1)
+        self.service = service
+
+    @staticmethod
+    def _stat_value(block, *names):
+        vals = block.get("values") or {}
+        lowered = {str(k).lower(): v for k, v in vals.items()}
+        for name in names:
+            if name.lower() in lowered:
+                value = lowered[name.lower()]
+                return "–" if value is None else str(value)
+        return "–"
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        data = await self.service.live_match_details(self.values[0])
+        m = data.get("match")
+        if not m:
+            await interaction.followup.send("Ce match n'est plus disponible.", ephemeral=True)
+            return
+        hs = "–" if m["home_score"] is None else str(m["home_score"])
+        aws = "–" if m["away_score"] is None else str(m["away_score"])
+        clock = str(m["live_clock"] or "")
+        embed = discord.Embed(
+            title=f"⚽ {m['home_team']}  {hs} - {aws}  {m['away_team']}",
+            description=f"🏆 **{m['competition_name']}**" + (f" • **{clock}**" if clock else ""),
+            color=discord.Color.red(),
+        )
+
+        events = data.get("events") or []
+        if events:
+            lines = []
+            for ev in events[-12:]:
+                label = LIVE_EVENT_LABELS.get(str(ev["event_type"]), "🔴 Live")
+                when = str(ev["clock"] or "").strip()
+                detail = str(ev["detail"] or "").strip()
+                lines.append(f"`{when or '•'}` {label}" + (f" — {detail}" if detail else ""))
+            embed.add_field(name="📜 Événements", value="\n".join(lines)[-1024:], inline=False)
+
+        stats = (data.get("external") or {}).get("statistics") or []
+        if len(stats) >= 2:
+            left, right = stats[0], stats[1]
+            metrics = [
+                ("Possession", ("Ball Possession",)),
+                ("Tirs", ("Total Shots",)),
+                ("Tirs cadrés", ("Shots on Goal",)),
+                ("Corners", ("Corner Kicks",)),
+                ("Fautes", ("Fouls",)),
+                ("Hors-jeu", ("Offsides",)),
+            ]
+            rows = []
+            for label, names in metrics:
+                rows.append(f"**{label}**  {self._stat_value(left,*names)}  •  {self._stat_value(right,*names)}")
+            embed.add_field(
+                name=f"📊 {left.get('team','Domicile')}  ↔  {right.get('team','Extérieur')}",
+                value="\n".join(rows), inline=False)
+        elif not SETTINGS.five_dollar_api_key:
+            embed.add_field(name="📊 Statistiques avancées", value="Ajoute `FIVE_DOLLAR_FOOTBALL_API_KEY` pour les statistiques live et les événements enrichis.", inline=False)
+
+        embed.set_footer(text=f"Source live : {m['live_source'] or 'Oddium multi-source'}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+class LiveDetailsSelectView(discord.ui.View):
+    def __init__(self, service, matches):
+        super().__init__(timeout=90)
+        self.add_item(LiveDetailsSelect(service, matches))
+
+
 class LivePanelView(discord.ui.View):
     def __init__(self, service: BettingService):
         super().__init__(timeout=None); self.service=service
 
-    @discord.ui.button(label="Suivre un match", style=discord.ButtonStyle.danger, emoji="🔔", custom_id="oddium:live:follow")
+    @discord.ui.button(label="Détails", style=discord.ButtonStyle.primary, emoji="📊", custom_id="oddium:live:details")
+    async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
+        matches = await self.service.live_matches(25)
+        if not matches:
+            await interaction.response.send_message("⚽ Aucun match live actuellement.", ephemeral=True)
+            return
+        await interaction.response.send_message("📊 Sélectionne un match :", view=LiveDetailsSelectView(self.service, matches), ephemeral=True)
+
+    @discord.ui.button(label="Suivre", style=discord.ButtonStyle.danger, emoji="🔔", custom_id="oddium:live:follow")
     async def follow(self, interaction: discord.Interaction, button: discord.ui.Button):
         matches=await self.service.live_matches(25)
         if not matches:
@@ -781,7 +872,7 @@ class LivePanelView(discord.ui.View):
         followed=await self.service.followed_event_ids(interaction.user.id)
         await interaction.response.send_message("🔔 Sélectionne un match :",view=LiveFollowSelectView(self.service,matches,followed),ephemeral=True)
 
-    @discord.ui.button(label="Mes paris live", style=discord.ButtonStyle.success, emoji="🎫", custom_id="oddium:live:bets")
+    @discord.ui.button(label="Mes paris", style=discord.ButtonStyle.success, emoji="🎫", custom_id="oddium:live:bets")
     async def bets(self, interaction: discord.Interaction, button: discord.ui.Button):
         rows=await self.service.user_live_bets(interaction.user.id)
         if not rows:
@@ -794,10 +885,22 @@ class LivePanelView(discord.ui.View):
             lines.append(f"**BET-{r['id']}** • {r['home_team']} **{hs}-{aws}** {r['away_team']}\n{state} • mise **{fmt_num(r['stake'])}** • gain potentiel **{fmt_num(r['potential_payout'])} {SETTINGS.currency_name}**")
         await interaction.response.send_message(embed=discord.Embed(title="🎫 Mes paris en direct",description="\n\n".join(lines),color=discord.Color.green()),ephemeral=True)
 
-    @discord.ui.button(label="Actualiser", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="oddium:live:refresh")
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        await interaction.followup.send("✅ Le panneau est piloté automatiquement par Oddium Live. État relu depuis le cache live.",ephemeral=True)
+    @discord.ui.button(label="Mes suivis", style=discord.ButtonStyle.secondary, emoji="🔔", custom_id="oddium:live:following")
+    async def following(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = await self.service.followed_matches(interaction.user.id, 25)
+        if not rows:
+            await interaction.response.send_message("🔕 Tu ne suis actuellement aucun match.", ephemeral=True)
+            return
+        lines = []
+        for m in rows:
+            hs = "–" if m["home_score"] is None else str(m["home_score"])
+            aws = "–" if m["away_score"] is None else str(m["away_score"])
+            phase = str(m["live_phase"] or m["match_status"] or "pending")
+            clock = str(m["live_clock"] or "")
+            state = f"{phase} {clock}".strip()
+            lines.append(f"🔔 **{m['home_team']} {hs}-{aws} {m['away_team']}**\n`{state}`")
+        embed = discord.Embed(title="🔔 Mes matchs suivis", description="\n\n".join(lines)[:4000], color=discord.Color.blurple())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ========================= V8.9 — ÉCRAN TITRE / MODES DE PARI =========================
 
@@ -818,7 +921,7 @@ async def build_title_embed(service: BettingService) -> discord.Embed:
     embed.set_image(url="attachment://oddium_welcome.png")
     embed.add_field(name="⚽ Voir les matchs", value="Parcours les championnats et consulte les rencontres disponibles.", inline=True)
     embed.add_field(name="🎟️ Parier", value="Choisis entre **pari simple** et **pari combiné**.", inline=True)
-    embed.set_footer(text=f"ODDIUM • {count} match(s) disponibles • Cotes Oddium Fusion")
+    embed.set_footer(text=f"ODDIUM • {count} match(s) disponibles • Cotes Bet365 via 5Dollar")
     return embed
 
 
@@ -1125,7 +1228,7 @@ async def build_title_embed(service: BettingService) -> discord.Embed:
     e.add_field(name="⚽ Matchs", value="Championnats, horaires et cotes", inline=True)
     e.add_field(name="🎟️ Parier", value="Simple ou combiné", inline=True)
     e.add_field(name="📋 Mes paris", value="Tickets et résultats", inline=True)
-    e.set_footer(text="ODDIUM • Cotes Oddium Fusion • Données live gratuites • Gold virtuel")
+    e.set_footer(text="ODDIUM • Bet365/5Dollar • Live multi-source • Gold virtuel")
     return e
 
 class HomeReturnView(discord.ui.View):
