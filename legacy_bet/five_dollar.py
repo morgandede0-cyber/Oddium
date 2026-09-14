@@ -293,7 +293,10 @@ class FiveDollarClient:
         if not kind:
             return None
         minute = ev.get("minute")
-        clock = f"{minute}'" if minute not in (None, "") else ""
+        # A period score is a snapshot (e.g. first-half 1-0), not an event
+        # happening again at every polling minute. 5Dollar can repeat it in
+        # every live payload, so it must not inherit the moving match clock.
+        clock = "" if kind == "period_score" else (f"{minute}'" if minute not in (None, "") else "")
         side = str(ev.get("team") or "").lower()
         team_name = home if side == "home" else away if side == "away" else ""
         pieces: list[str] = []
@@ -313,7 +316,11 @@ class FiveDollarClient:
             "type": kind,
             "clock": clock,
             "detail": " • ".join(pieces)[:300],
-            "provider_id": f"5d:{kind}:{minute}:{side}:{ev.get('count')}:{ev.get('player_in')}:{ev.get('player_out')}:{ev.get('period')}",
+            "provider_id": (
+                f"5d:{kind}:{ev.get('period')}:{(ev.get('score') or {}).get('home')}:{(ev.get('score') or {}).get('away')}"
+                if kind == "period_score" else
+                f"5d:{kind}:{minute}:{side}:{ev.get('count')}:{ev.get('player_in')}:{ev.get('player_out')}:{ev.get('period')}"
+            ),
         }
 
     @staticmethod

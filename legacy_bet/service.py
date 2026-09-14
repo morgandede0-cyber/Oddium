@@ -379,6 +379,18 @@ class BettingService:
         settlements: list[dict] = []
         errors: list[str] = []
         live_events: list[dict] = []
+        # Semantic keys seen during THIS refresh. DB checks alone are not enough
+        # because several providers / repeated 5Dollar rows can enqueue the same
+        # event before the batch is persisted at the end of the cycle.
+        pending_live_event_keys: set[tuple[str, str, str, str]] = set()
+
+        def _live_event_key(event_id, event_type, clock, detail):
+            etype = str(event_type or "").strip().lower()
+            # period_score is a snapshot and can be repeated at 57', 58', 59'...
+            # Ignore its clock so one period/score combination appears once.
+            eclock = "" if etype == "period_score" else str(clock or "").strip().lower()
+            edetail = " ".join(str(detail or "").strip().lower().split())
+            return (str(event_id or ""), etype, eclock, edetail)
         now = datetime.now(timezone.utc)
         try:
             kickoff_events = await self._promote_scheduled_kickoffs()
@@ -691,12 +703,22 @@ class BettingService:
                         pdetail = str(pev.get("detail") or "")
                         if not ptype:
                             continue
-                        seen = await self.db.fetchone(
-                            "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND COALESCE(clock,'')=? AND COALESCE(detail,'')=? LIMIT 1",
-                            (target_event_id, ptype, pclock, pdetail),
-                        )
+                        semantic_key = _live_event_key(target_event_id, ptype, pclock, pdetail)
+                        if semantic_key in pending_live_event_keys:
+                            continue
+                        if ptype == "period_score":
+                            seen = await self.db.fetchone(
+                                "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND LOWER(TRIM(COALESCE(detail,'')))=LOWER(TRIM(?)) LIMIT 1",
+                                (target_event_id, ptype, pdetail),
+                            )
+                        else:
+                            seen = await self.db.fetchone(
+                                "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND COALESCE(clock,'')=? AND COALESCE(detail,'')=? LIMIT 1",
+                                (target_event_id, ptype, pclock, pdetail),
+                            )
                         if seen:
                             continue
+                        pending_live_event_keys.add(semantic_key)
                         live_events.append({
                             "type": ptype, "event_id": target_event_id,
                             "home_team": event.get("home_team") or old["home_team"],
@@ -758,7 +780,20 @@ class BettingService:
                     external = await self.odds_api.fetch_api_football_details(int(fixture_id))
                 except Exception:
                     external = {}
-        return {"match": match, "events": list(reversed(recent)), "external": external}
+        # UI-side semantic cleanup also hides duplicates already stored by older
+        # Oddium versions, so users do not need to wipe SQLite after updating.
+        cleaned = []
+        seen_event_keys = set()
+        for ev in reversed(recent):
+            etype = str(ev["event_type"] or "").strip().lower()
+            eclock = "" if etype == "period_score" else str(ev["clock"] or "").strip().lower()
+            edetail = " ".join(str(ev["detail"] or "").strip().lower().split())
+            key = (etype, eclock, edetail)
+            if key in seen_event_keys:
+                continue
+            seen_event_keys.add(key)
+            cleaned.append(ev)
+        return {"match": match, "events": cleaned, "external": external}
 
     @staticmethod
     def _team_display_key(value: str | None) -> str:
@@ -924,14 +959,33 @@ class BettingService:
         return self._dedupe_match_rows(rows, limit)
 
     async def record_live_event(self, event: dict) -> None:
-        """Persist the timeline used by the Live Center."""
+        """Persist the timeline used by the Live Center, idempotently."""
         if not event.get("event_id") or event.get("type") in {None, "hello"}:
+            return
+        event_id = str(event["event_id"])
+        event_type = str(event.get("type") or "live_update")
+        clock = str(event.get("clock") or "")
+        detail = str(event.get("detail") or "")
+        # Final guard against duplicates from retries, provider overlap or old
+        # polling cycles. Period-score snapshots are unique by their content,
+        # regardless of the minute at which the provider repeated them.
+        if event_type == "period_score":
+            exists = await self.db.fetchone(
+                "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND LOWER(TRIM(COALESCE(detail,'')))=LOWER(TRIM(?)) LIMIT 1",
+                (event_id, event_type, detail),
+            )
+        else:
+            exists = await self.db.fetchone(
+                "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND COALESCE(clock,'')=? AND COALESCE(detail,'')=? LIMIT 1",
+                (event_id, event_type, clock, detail),
+            )
+        if exists:
             return
         await self.db.execute(
             """INSERT INTO live_events(event_id,event_type,phase,clock,home_score,away_score,detail,source,created_at)
                VALUES(?,?,?,?,?,?,?,?,?)""",
-            (str(event["event_id"]), str(event.get("type") or "live_update"), event.get("phase"), event.get("clock"),
-             event.get("home_score"), event.get("away_score"), event.get("detail"), event.get("source"), utcnow_iso()),
+            (event_id, event_type, event.get("phase"), clock or None,
+             event.get("home_score"), event.get("away_score"), detail or None, event.get("source"), utcnow_iso()),
         )
         # Keep storage bounded while preserving a rich recent timeline.
         await self.db.execute(

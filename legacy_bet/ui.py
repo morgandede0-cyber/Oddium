@@ -741,6 +741,25 @@ class AdminPanelView(discord.ui.View):
         await self.service.db.log_admin(interaction.user.id, "BACKUP", path)
         await interaction.followup.send(f"✅ Sauvegarde créée : `{path}`", ephemeral=True)
 
+def _dedupe_live_highlights(events):
+    """Keep one human-visible copy of each highlight.
+
+    Old databases may already contain repeated 5Dollar period snapshots, so the
+    renderer must be defensive even after the ingestion fix.
+    """
+    cleaned = []
+    seen = set()
+    for ev in events or []:
+        etype = str(ev["event_type"] or "").strip().lower()
+        detail = " ".join(str(ev["detail"] or "").strip().lower().split())
+        clock = "" if etype == "period_score" else str(ev["clock"] or "").strip().lower()
+        key = (etype, clock, detail)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(ev)
+    return cleaned
+
 LIVE_EVENT_LABELS = {
     "match_started": "🟢 Coup d’envoi", "goal_or_score": "⚽ Score modifié",
     "goal": "⚽ But", "var": "📺 VAR", "yellow_card": "🟨 Carton jaune",
@@ -812,7 +831,7 @@ class LiveDetailsSelect(discord.ui.Select):
             color=discord.Color.red(),
         )
 
-        events = data.get("events") or []
+        events = _dedupe_live_highlights(data.get("events") or [])
         if events:
             lines = []
             for ev in events[-12:]:
@@ -1649,7 +1668,7 @@ class LiveDetailsSelect(discord.ui.Select):
                 stat_lines.append(f"`{lv:>4}`  **{label}**  `{rv:<4}`")
             e.add_field(name="📊 STATISTIQUES", value="\n".join(stat_lines)[:1024], inline=False)
 
-        events = data.get("events") or []
+        events = _dedupe_live_highlights(data.get("events") or [])
         useful = [ev for ev in events if str(ev["event_type"]) not in {"live_update", "clock_update", "phase_change"}]
         if useful:
             lines = []
