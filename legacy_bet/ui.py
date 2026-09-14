@@ -1681,8 +1681,14 @@ class LiveDetailsSelect(discord.ui.Select):
         else:
             e.add_field(name="📜 TEMPS FORTS", value="Aucun événement majeur signalé pour le moment.", inline=False)
 
-        e.set_footer(text="ODDIUM LIVE • les données techniques restent masquées")
-        await interaction.followup.send(embed=e, ephemeral=True)
+        e.set_footer(text="ODDIUM LIVE • ouvre le Match Center ci-dessous")
+        # V15: keep the first response compact, then let the user switch between
+        # summary/stats/highlights/market without spawning new Discord messages.
+        await interaction.followup.send(
+            embed=e,
+            view=V15MatchCenterView(self.service, str(m["event_id"]), interaction.user.id),
+            ephemeral=True,
+        )
 
 
 class LiveDetailsSelectView(discord.ui.View):
@@ -1907,3 +1913,159 @@ class MatchSelect(discord.ui.Select):
         e.add_field(name=f"2  {match['away_team']}", value=f"### `{_safe_odd(match['away_odd'])}` {trend['away']}\n📊 {probs[2]}%", inline=True)
         e.set_footer(text="Choisis 1 / N / 2 ci-dessous • la cote est vérifiée au moment de valider")
         await interaction.response.send_message(embed=e, view=MatchBetView(self.service, match), ephemeral=True)
+
+# --- V15 Best-of Match Center ----------------------------------------------
+
+def _v15_highlight_detail(detail: str) -> str:
+    text = str(detail or "").strip()
+    low = text.lower()
+    if "score de période first half" in low or "period score first half" in low:
+        score = text.split(":", 1)[-1].strip() if ":" in text else ""
+        return f"Score à la mi-temps : {score}" if score else "Score à la mi-temps"
+    if "score de période second half" in low or "period score second half" in low:
+        score = text.split(":", 1)[-1].strip() if ":" in text else ""
+        return f"Score de la 2e période : {score}" if score else "Score de la 2e période"
+    return text
+
+
+def _v15_stat_value(block, *names):
+    vals = block.get("values") or {}
+    lowered = {str(k).lower(): v for k, v in vals.items()}
+    for name in names:
+        if name.lower() in lowered:
+            value = lowered[name.lower()]
+            return "—" if value is None else str(value)
+    return "—"
+
+
+async def _v15_match_center_embed(service: BettingService, event_id: str, tab: str = "summary"):
+    data = await service.live_match_details(event_id)
+    m = data.get("match")
+    if not m:
+        return discord.Embed(title="Match indisponible", color=ODDIUM_RED)
+    badge, color = _phase_badge(m)
+    hs = "–" if m["home_score"] is None else str(m["home_score"])
+    aws = "–" if m["away_score"] is None else str(m["away_score"])
+    title = f"{m['home_team']}   {hs} — {aws}   {m['away_team']}"
+    e = discord.Embed(title=title, description=f"**{m['competition_name']}**  •  {badge}", color=color)
+    external = data.get("external") or {}
+    stats = external.get("statistics") or []
+    events = _dedupe_live_highlights(data.get("events") or [])
+    useful = [ev for ev in events if str(ev["event_type"]) not in {"live_update", "clock_update", "phase_change"}]
+
+    if tab == "stats":
+        if len(stats) >= 2:
+            left, right = stats[0], stats[1]
+            metrics = [
+                ("Possession", ("Ball Possession", "Possession")),
+                ("Tirs", ("Total Shots", "Shots")),
+                ("Cadrés", ("Shots on Goal", "Shots on Target")),
+                ("Corners", ("Corner Kicks", "Corners")),
+                ("Fautes", ("Fouls",)),
+                ("Hors-jeu", ("Offsides",)),
+            ]
+            left_name = str(left.get("team") or m["home_team"])
+            right_name = str(right.get("team") or m["away_team"])
+            lines = [f"**{left_name}**　　　**{right_name}**"]
+            for label, names in metrics:
+                lv = _v15_stat_value(left, *names); rv = _v15_stat_value(right, *names)
+                lines.append(f"`{lv:>4}`  **{label}**  `{rv:<4}`")
+            e.add_field(name="📊 STATISTIQUES", value="\n".join(lines)[:1024], inline=False)
+        else:
+            e.add_field(name="📊 STATISTIQUES", value="Données détaillées indisponibles pour le moment.", inline=False)
+        e.set_footer(text="ODDIUM MATCH CENTER • statistiques")
+        return e
+
+    if tab == "highlights":
+        if useful:
+            lines = []
+            for ev in useful[-12:]:
+                label = LIVE_EVENT_LABELS.get(str(ev["event_type"]), "•")
+                when = str(ev["clock"] or "").strip() or "•"
+                detail = _v15_highlight_detail(str(ev["detail"] or ""))
+                lines.append(f"`{when:>3}`  {label}" + (f"  **{detail}**" if detail else ""))
+            e.add_field(name="📜 TEMPS FORTS", value="\n".join(lines)[-1024:], inline=False)
+        else:
+            e.add_field(name="📜 TEMPS FORTS", value="Aucun événement majeur signalé pour le moment.", inline=False)
+        e.set_footer(text="ODDIUM MATCH CENTER • timeline dédupliquée")
+        return e
+
+    if tab == "market":
+        snap = await service.odds_market_snapshot(event_id)
+        if not snap:
+            e.add_field(name="📈 MARCHÉ", value="Aucune cote disponible.", inline=False)
+        else:
+            opening = snap.get("opening") or {}; current = snap.get("current") or {}
+            move = snap.get("movement") or {}; fair = snap.get("fair_probability") or {}
+            labels = [("1", "home"), ("N", "draw"), ("2", "away")]
+            lines = []
+            for lab, key in labels:
+                op = opening.get(key); cur = current.get(key); mv = float(move.get(key) or 0)
+                arrow = "⬆️" if mv > 0 else "⬇️" if mv < 0 else "➡️"
+                op_txt = _safe_odd(op); cur_txt = _safe_odd(cur)
+                lines.append(f"**{lab}**  `{op_txt}` → **`{cur_txt}`**  {arrow} `{mv:+.1f}%`  •  {float(fair.get(key) or 0):.1f}%")
+            e.add_field(name="📈 OUVERTURE → ACTUEL", value="\n".join(lines), inline=False)
+            e.add_field(name="BOOKMAKER", value=str(current.get("bookmaker") or "Oddium Fusion")[:1024], inline=False)
+            e.set_footer(text=f"ODDIUM MARKET • {int(snap.get('samples') or 0)} snapshot(s) • probabilités normalisées")
+        return e
+
+    # Summary: concise live-score card, inspired by score trackers.
+    clock = str(m["live_clock"] or "").strip()
+    source = str(m["live_source"] or "").strip()
+    summary = []
+    if clock and str(m["live_phase"] or "") not in {"halftime", "finished", "cancelled", "postponed", "suspended"}:
+        summary.append(f"⏱️ **{clock}**")
+    if useful:
+        last = useful[-1]
+        lab = LIVE_EVENT_LABELS.get(str(last["event_type"]), "•")
+        detail = _v15_highlight_detail(str(last["detail"] or ""))
+        summary.append(f"Dernier fait : {lab} **{detail or 'Événement live'}**")
+    if source:
+        summary.append("🟢 Données live confirmées")
+    e.add_field(name="⚡ RÉSUMÉ", value="\n".join(summary) if summary else "Match en cours de synchronisation.", inline=False)
+    if len(stats) >= 2:
+        left, right = stats[0], stats[1]
+        poss_l = _v15_stat_value(left, "Ball Possession", "Possession")
+        poss_r = _v15_stat_value(right, "Ball Possession", "Possession")
+        shots_l = _v15_stat_value(left, "Shots on Goal", "Shots on Target")
+        shots_r = _v15_stat_value(right, "Shots on Goal", "Shots on Target")
+        e.add_field(name="EN UN COUP D’ŒIL", value=f"Possession `{poss_l} — {poss_r}`\nTirs cadrés `{shots_l} — {shots_r}`", inline=False)
+    e.set_footer(text="ODDIUM MATCH CENTER • Résumé • Stats • Temps forts • Marché")
+    return e
+
+
+class V15MatchCenterView(discord.ui.View):
+    def __init__(self, service: BettingService, event_id: str, user_id: int | None = None):
+        super().__init__(timeout=180)
+        self.service = service
+        self.event_id = str(event_id)
+        self.user_id = user_id
+
+    async def _show(self, interaction: discord.Interaction, tab: str):
+        await interaction.response.defer()
+        embed = await _v15_match_center_embed(self.service, self.event_id, tab)
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    @discord.ui.button(label="Résumé", emoji="⚡", style=discord.ButtonStyle.primary, row=0)
+    async def summary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show(interaction, "summary")
+
+    @discord.ui.button(label="Stats", emoji="📊", style=discord.ButtonStyle.secondary, row=0)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show(interaction, "stats")
+
+    @discord.ui.button(label="Temps forts", emoji="📜", style=discord.ButtonStyle.secondary, row=0)
+    async def highlights(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show(interaction, "highlights")
+
+    @discord.ui.button(label="Marché", emoji="📈", style=discord.ButtonStyle.secondary, row=0)
+    async def market(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._show(interaction, "market")
+
+    @discord.ui.button(label="Suivre", emoji="🔔", style=discord.ButtonStyle.danger, row=1)
+    async def follow(self, interaction: discord.Interaction, button: discord.ui.Button):
+        state = await self.service.toggle_match_follow(interaction.user.id, self.event_id)
+        button.label = "Suivi activé" if state else "Suivre"
+        button.style = discord.ButtonStyle.success if state else discord.ButtonStyle.danger
+        embed = await _v15_match_center_embed(self.service, self.event_id, "summary")
+        await interaction.response.edit_message(embed=embed, view=self)

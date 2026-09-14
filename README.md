@@ -1,4 +1,4 @@
-# Oddium V13 — Premium Clean UI + 5Dollar Engine
+# Oddium V15 — Best-of Engine + Match Center + 5Dollar Pro
 
 Bot Discord de paris football virtuels avec cotes Bet365, live-score, événements, statistiques, favoris, combinés, classements et économie Gold.
 
@@ -29,4 +29,4 @@ Docker/Coolify : utiliser `Dockerfile` ou `docker-compose.coolify.yml`.
 
 Commandes principales : `/setup`, `/setup_live`, `/diagnostic_oddium`, `/admin_paris`.
 
-Voir `V12_5DOLLAR_ENGINE.md` pour le moteur 5Dollar et `V13_PREMIUM_CLEAN_UI.md` pour la refonte interface.
+Voir `V15_BEST_OF_ENGINE.md` pour les améliorations V15, `V12_5DOLLAR_ENGINE.md` pour le moteur 5Dollar et `V13_PREMIUM_CLEAN_UI.md` pour la base visuelle.

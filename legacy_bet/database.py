@@ -160,6 +160,7 @@ class Database:
                     away_score INTEGER,
                     detail TEXT,
                     source TEXT,
+                    fingerprint TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(event_id) REFERENCES matches(event_id) ON DELETE CASCADE
                 );
@@ -203,6 +204,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_matches_sport_time ON matches(sport_key, commence_time);
                 CREATE INDEX IF NOT EXISTS idx_odds_history_event ON odds_history(event_id, captured_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_live_events_event ON live_events(event_id, id DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_live_event_fingerprint ON live_events(event_id, fingerprint) WHERE fingerprint IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS provider_fixture_aliases (
+                    provider TEXT NOT NULL, provider_fixture_id TEXT NOT NULL, event_id TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(provider, provider_fixture_id),
+                    FOREIGN KEY(event_id) REFERENCES matches(event_id) ON DELETE CASCADE
+                );
                 CREATE INDEX IF NOT EXISTS idx_match_follows_event ON match_follows(event_id);
                 """
             )
@@ -218,6 +225,7 @@ class Database:
             await self._ensure_column(db, "matches", "live_phase", "TEXT NOT NULL DEFAULT 'pending'")
             await self._ensure_column(db, "matches", "live_clock", "TEXT")
             await self._ensure_column(db, "matches", "live_detail", "TEXT")
+            await self._ensure_column(db, "live_events", "fingerprint", "TEXT")
             await self._ensure_column(db, "matches", "live_source", "TEXT")
             await self._ensure_column(db, "matches", "api_football_fixture_id", "INTEGER")
             await self._ensure_column(db, "matches", "five_dollar_fixture_id", "INTEGER")

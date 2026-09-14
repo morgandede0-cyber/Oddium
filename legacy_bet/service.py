@@ -10,6 +10,7 @@ from .database import Database, utcnow_iso
 from .economy import EconomyAdapter
 from .odds_api import OddsAPI
 from .oddium_odds import OddiumOddsEngine
+from .live_identity import event_fingerprint
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
@@ -114,6 +115,8 @@ class BettingService:
                                 "INSERT INTO odds_history(event_id,home_odd,draw_odd,away_odd,bookmaker,captured_at) VALUES(?,?,?,?,?,?)",
                                 (target_id,hodd,dodd,aodd,bookmaker,now_iso),
                             )
+                    if five_id:
+                        await self.bind_provider_fixture("5dollar", five_id, target_id)
             except Exception as exc:
                 errors.append(f"{COMPETITIONS.get(key, {}).get('name', key)}: {exc}")
         self._last_events_refresh = datetime.now(timezone.utc)
@@ -364,6 +367,40 @@ class BettingService:
             src = str(parsed.get("source") or "").lower()
             return (state_rank.get(st, 1), source_rank.get(src, 0), 1 if parsed.get("live_clock") else 0)
         return sorted(list(raws or []), key=key)
+
+    @staticmethod
+    def _phase_transition_allowed(old_phase: str | None, new_phase: str | None) -> bool:
+        """Monotonic football state machine inspired by robust live trackers.
+
+        Providers occasionally answer out of order (for example 2H then 1H on the
+        next poll). Oddium accepts legitimate pauses/resumes but rejects impossible
+        backwards transitions. Terminal states stay terminal.
+        """
+        old = str(old_phase or "pending").lower()
+        new = str(new_phase or "pending").lower()
+        if old == new:
+            return True
+        terminal = {"finished", "cancelled", "postponed"}
+        if old in terminal:
+            return False
+        if new in terminal:
+            return True
+        # A suspended game may resume in the same/later football period.
+        if old == "suspended":
+            return new in {"live", "first_half", "halftime", "second_half", "extra_time", "penalties", "suspended"}
+        if new == "suspended":
+            return old not in terminal
+        rank = {
+            "pending": 0, "kickoff_wait": 1, "live": 2, "first_half": 3,
+            "halftime": 4, "second_half": 5, "extra_time": 6, "penalties": 7,
+        }
+        # Generic live is intentionally permissive: some providers only expose
+        # IN_PLAY while others expose 1H/2H. It must never drag a known period back.
+        if new == "live" and old in {"first_half", "halftime", "second_half", "extra_time", "penalties"}:
+            return True
+        if old == "live" and new in rank:
+            return True
+        return rank.get(new, -1) >= rank.get(old, -1)
 
     async def refresh_scores_and_settle(self, *, force_live_panel: bool = False) -> tuple[int, list[dict], list[str]]:
         """Refresh scores only where useful.
@@ -632,6 +669,21 @@ class BettingService:
                     old_phase = str(old["live_phase"] or old["match_status"] or "pending")
                     new_phase = status
                     if new_phase == "pending" and old_phase in {"kickoff_wait","live","first_half","halftime","second_half","extra_time","penalties","suspended"}:
+                        new_phase = old_phase
+                        status = old_phase
+                    # V15: generic IN_PLAY must not erase a more precise known
+                    # football period. After a confirmed half-time, IN_PLAY means the
+                    # second half has resumed even if that provider does not expose 2H.
+                    if new_phase == "live" and old_phase in {"first_half", "second_half", "extra_time", "penalties"}:
+                        new_phase = old_phase
+                        status = old_phase
+                    elif new_phase == "live" and old_phase == "halftime":
+                        new_phase = "second_half"
+                        status = "second_half"
+                    # Reject impossible backwards live transitions coming from an
+                    # older/slower provider response. Score updates can still be
+                    # accepted while the authoritative phase remains unchanged.
+                    if not self._phase_transition_allowed(old_phase, new_phase):
                         new_phase = old_phase
                         status = old_phase
                     old_clock = str(old["live_clock"] or "")
@@ -959,39 +1011,44 @@ class BettingService:
         return self._dedupe_match_rows(rows, limit)
 
     async def record_live_event(self, event: dict) -> None:
-        """Persist the timeline used by the Live Center, idempotently."""
-        if not event.get("event_id") or event.get("type") in {None, "hello"}:
+        """Persist one semantic live event once, even across providers/restarts."""
+        if not event.get("event_id") or event.get("type") in {None, "hello", "clock_update"}:
             return
         event_id = str(event["event_id"])
         event_type = str(event.get("type") or "live_update")
         clock = str(event.get("clock") or "")
         detail = str(event.get("detail") or "")
-        # Final guard against duplicates from retries, provider overlap or old
-        # polling cycles. Period-score snapshots are unique by their content,
-        # regardless of the minute at which the provider repeated them.
-        if event_type == "period_score":
-            exists = await self.db.fetchone(
-                "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND LOWER(TRIM(COALESCE(detail,'')))=LOWER(TRIM(?)) LIMIT 1",
-                (event_id, event_type, detail),
-            )
-        else:
-            exists = await self.db.fetchone(
-                "SELECT 1 FROM live_events WHERE event_id=? AND event_type=? AND COALESCE(clock,'')=? AND COALESCE(detail,'')=? LIMIT 1",
-                (event_id, event_type, clock, detail),
-            )
+        fp = event_fingerprint({"type": event_type, "clock": clock, "detail": detail})
+        exists = await self.db.fetchone("SELECT 1 FROM live_events WHERE event_id=? AND fingerprint=? LIMIT 1", (event_id, fp))
         if exists:
             return
         await self.db.execute(
-            """INSERT INTO live_events(event_id,event_type,phase,clock,home_score,away_score,detail,source,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            (event_id, event_type, event.get("phase"), clock or None,
-             event.get("home_score"), event.get("away_score"), detail or None, event.get("source"), utcnow_iso()),
+            """INSERT OR IGNORE INTO live_events(event_id,event_type,phase,clock,home_score,away_score,detail,source,fingerprint,created_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (event_id, event_type, event.get("phase"), clock or None, event.get("home_score"), event.get("away_score"),
+             detail or None, event.get("source"), fp, utcnow_iso()),
         )
-        # Keep storage bounded while preserving a rich recent timeline.
         await self.db.execute(
             "DELETE FROM live_events WHERE event_id=? AND id NOT IN (SELECT id FROM live_events WHERE event_id=? ORDER BY id DESC LIMIT 150)",
-            (str(event["event_id"]), str(event["event_id"])),
+            (event_id, event_id),
         )
+
+    async def bind_provider_fixture(self, provider: str, provider_fixture_id: object, event_id: str) -> None:
+        if provider_fixture_id in (None, ""):
+            return
+        await self.db.execute(
+            """INSERT INTO provider_fixture_aliases(provider,provider_fixture_id,event_id,updated_at) VALUES(?,?,?,?)
+               ON CONFLICT(provider,provider_fixture_id) DO UPDATE SET event_id=excluded.event_id,updated_at=excluded.updated_at""",
+            (str(provider).lower(), str(provider_fixture_id), str(event_id), utcnow_iso()),
+        )
+
+    async def resolve_provider_fixture(self, provider: str, provider_fixture_id: object):
+        if provider_fixture_id in (None, ""):
+            return None
+        row = await self.db.fetchone("SELECT event_id FROM provider_fixture_aliases WHERE provider=? AND provider_fixture_id=?", (str(provider).lower(), str(provider_fixture_id)))
+        if not row:
+            return None
+        return await self.db.fetchone("SELECT * FROM matches WHERE event_id=?", (row["event_id"],))
 
     async def recent_live_events(self, event_id: str, limit: int = 6):
         return await self.db.fetchall(
@@ -1180,6 +1237,49 @@ class BettingService:
             "home": arrow(latest["home_odd"], previous["home_odd"]),
             "draw": arrow(latest["draw_odd"], previous["draw_odd"]),
             "away": arrow(latest["away_odd"], previous["away_odd"]),
+        }
+
+    async def odds_market_snapshot(self, event_id: str) -> dict:
+        """Return opening/current market information for the Match Center."""
+        rows = await self.db.fetchall(
+            "SELECT home_odd,draw_odd,away_odd,bookmaker,captured_at FROM odds_history WHERE event_id=? ORDER BY id ASC",
+            (event_id,),
+        )
+        match = await self.db.fetchone(
+            "SELECT home_odd,draw_odd,away_odd,bookmaker,last_odds_update FROM matches WHERE event_id=?",
+            (event_id,),
+        )
+        if not match:
+            return {}
+        current = {
+            "home": match["home_odd"], "draw": match["draw_odd"], "away": match["away_odd"],
+            "bookmaker": match["bookmaker"], "captured_at": match["last_odds_update"],
+        }
+        if rows:
+            opening_row = rows[0]
+            opening = {"home": opening_row["home_odd"], "draw": opening_row["draw_odd"], "away": opening_row["away_odd"]}
+        else:
+            opening = {k: current[k] for k in ("home", "draw", "away")}
+
+        def movement(key: str) -> float:
+            a = opening.get(key); b = current.get(key)
+            if a in (None, 0) or b is None:
+                return 0.0
+            return round((float(b) - float(a)) / float(a) * 100.0, 1)
+
+        vals = [current.get("home"), current.get("draw"), current.get("away")]
+        fair = [0.0, 0.0, 0.0]
+        try:
+            inv = [1.0 / float(v) for v in vals]
+            total = sum(inv) or 1.0
+            fair = [round(x / total * 100.0, 1) for x in inv]
+        except Exception:
+            pass
+        return {
+            "opening": opening, "current": current,
+            "movement": {k: movement(k) for k in ("home", "draw", "away")},
+            "fair_probability": {"home": fair[0], "draw": fair[1], "away": fair[2]},
+            "samples": len(rows),
         }
 
     async def place_bet(self, user_id: int, event_id: str, selection: str, stake: int, displayed_odd: float):

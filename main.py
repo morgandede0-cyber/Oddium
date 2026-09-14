@@ -17,6 +17,7 @@ from legacy_bet.panel import PanelManager
 from legacy_bet.service import BettingService
 from legacy_bet.ui import AdminPanelView, MainPanelView, LivePanelView, LIVE_EVENT_LABELS, fmt_num
 from legacy_bet.live_ws import LocalLiveWebSocket, consume_local_live
+from legacy_bet.live_identity import event_fingerprint
 
 os.makedirs(SETTINGS.log_dir, exist_ok=True)
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -72,8 +73,15 @@ async def notify_live_followers(event: dict):
     hs = event.get("home_score"); aws = event.get("away_score"); clock = event.get("clock")
     score = f"{hs} - {aws}" if hs is not None and aws is not None else "– - –"
     text = f"{label} **{clock or ''}**\n**{home} {score} {away}**"
+    fp = event_fingerprint({"type": etype, "clock": clock, "detail": event.get("detail")})
+    reference = f"{event_id}:{fp}"
     for row in followers:
         uid=int(row["user_id"])
+        # V15: a retry/reconnect/redeploy must never send the same live alert twice.
+        # notification_log is UNIQUE(user, kind, reference), so this remains safe
+        # across process restarts as well.
+        if not await service.mark_notification_sent(uid, "LIVE_FOLLOW", reference):
+            continue
         try:
             user=bot.get_user(uid) or await bot.fetch_user(uid)
             await user.send(text)
@@ -187,7 +195,7 @@ async def diagnostic_oddium(interaction: discord.Interaction):
     live_count = int(await db.get_setting("live_engine_visible_count") or 0)
     last_scan = await db.get_setting("live_engine_last_scan")
     embed = discord.Embed(
-        title="🩺 Diagnostic Oddium V13",
+        title="🩺 Diagnostic Oddium V15",
         description="5Dollar Engine • fixtures + Bet365 + live/events/stats • ESPN/Sofascore/FotMob/TheSportsDB en secours",
         color=discord.Color.green() if not status.get("last_error") else discord.Color.orange(),
     )
@@ -258,7 +266,7 @@ async def live_collector_supervisor():
     can no longer stop the collector. Public-source caches in OddsAPI bound network use.
     """
     await bot.wait_until_ready()
-    log.info("Oddium V13 Premium UI • 5Dollar Engine • Live dédupliqué")
+    log.info("Oddium V15 Best-of Engine • 5Dollar Pro • Match Center • Live robuste")
     previous_signature = None
     failures = 0
     while not bot.is_closed():
