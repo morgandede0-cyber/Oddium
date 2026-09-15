@@ -916,10 +916,12 @@ class OddsAPI:
             category = tournament.get("category") or unique.get("category") or {}
             country_norm = self._norm(category.get("name") or category.get("slug"))
             wanted_countries = self.SOFASCORE_COUNTRY_NAMES.get(sport_key, set())
+            # V16.1: strict tournament identity. The previous fuzzy name/country
+            # fallback could classify unrelated competitions as La Liga/UCL when a
+            # provider payload used ambiguous tournament metadata. SofaScore's unique
+            # tournament id is stable for the six competitions Oddium supports.
             by_id = uid == tournament_id
-            by_name = name_norm in wanted_names
-            by_country = bool(wanted_countries and country_norm in wanted_countries and any(alias in name_norm for alias in wanted_names))
-            if not (by_id or by_name or by_country):
+            if not by_id:
                 continue
 
             home = ev.get("homeTeam") or {}

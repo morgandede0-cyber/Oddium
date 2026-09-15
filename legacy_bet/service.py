@@ -310,11 +310,10 @@ class BettingService:
         return out
 
     async def _reconcile_open_tickets(self) -> list[dict]:
-        """Resolve old pending tickets independently from the 5Dollar live engine.
+        """Resolve old pending tickets with 5Dollar first, independent sources as fallback.
 
-        Result priority is deliberately separate from the odds provider:
-        football-data.org -> Sofascore -> ESPN/FotMob/TheSportsDB -> 5Dollar last resort.
-        This prevents a missing 5Dollar historical fixture from blocking settlement.
+        Priority: direct 5Dollar fixture id -> 5Dollar finished league feed ->
+        football-data.org -> SofaScore -> ESPN/FotMob/TheSportsDB.
         """
         now = datetime.now(timezone.utc)
         oldest = (now - timedelta(days=7)).isoformat()
@@ -389,18 +388,33 @@ class BettingService:
             self._last_ticket_reconcile[event_id] = now
             sport_key = str(row["sport_key"])
 
-            # Build one independent result feed per competition. football-data.org is
-            # first when configured; public score providers supplement it. 5Dollar is
-            # intentionally LAST and is no longer required to settle a ticket.
+            # Direct fixture id is the safest possible settlement path.
+            five_id = row["five_dollar_fixture_id"] if "five_dollar_fixture_id" in row.keys() else None
+            if SETTINGS.five_dollar_api_key and five_id:
+                try:
+                    details = await self.odds_api.fetch_five_dollar_details(int(five_id), force=True)
+                    shell = (details or {}).get("fixture") or {}
+                    if str(shell.get("status") or "").lower() == "finished" and await finish(row, shell):
+                        continue
+                except Exception:
+                    pass
+
+            # Build one result feed per competition. 5Dollar Pro is first because it
+            # already owns the canonical fixture ids. Independent providers only fill
+            # a genuine coverage/feed gap.
             if sport_key not in result_feeds:
                 feed: list[dict] = []
+                if SETTINGS.five_dollar_api_key:
+                    try:
+                        feed.extend(await self.odds_api.fetch_five_dollar_finished(sport_key, days=7) or [])
+                    except Exception:
+                        pass
                 try:
                     feed.extend(await self.odds_api.fetch_scores(sport_key, days_from=7, force=True) or [])
                 except Exception:
                     pass
-                # Historical settlement is intentionally independent from 5Dollar.
-                # Query the actual calendar days of unresolved tickets, not only today's
-                # scoreboard (the old bug that left yesterday's matches orange).
+                # Independent historical fallbacks: query the actual calendar days of
+                # unresolved tickets, not only today's scoreboard.
                 for days_ago in range(0, 8):
                     target_day = (now - timedelta(days=days_ago)).date()
                     for method_name in ("fetch_sofascore_scores", "fetch_espn_scores"):
@@ -431,9 +445,7 @@ class BettingService:
                 if await finish(row, candidates[0][1]):
                     continue
 
-            # No 5Dollar fallback here by design: final-result settlement is
-            # isolated from the odds/live provider. Unresolved tickets remain pending
-            # until an independent result source confirms the final score.
+            # If every source fails, keep the ticket pending rather than inventing a result.
         return settlements
 
     async def reconcile_open_tickets(self) -> list[dict]:
@@ -541,9 +553,9 @@ class BettingService:
         - Pending bets near kickoff always trigger a competition score refresh.
         - If the live panel is installed, competitions with a match inside the live
           window are also refreshed, even when nobody has bet on them.
-        - SofaScore is the authoritative live state/clock source.
-        - ESPN is the only live fallback.
-        - 5Dollar is reserved for Bet365 odds and never drives the live state.
+        - 5Dollar Pro is authoritative for fixtures, live state, clock, score, events and stats.
+        - SofaScore is the first live fallback only when 5Dollar has no row for the competition.
+        - ESPN is the second live fallback. Ticket settlement also tries 5Dollar first.
         """
         active = await self.active_competitions()
         score_updates = 0
@@ -569,7 +581,7 @@ class BettingService:
         # sources; fixtures, odds, bets and finished results are preserved.
         try:
             core_version = await self.db.get_setting("live_core_version")
-            if core_version != "16":
+            if core_version != "17.0":
                 await self.db.execute(
                     """UPDATE matches SET match_status='pending', live_phase='pending',
                        live_clock=NULL, live_detail=NULL, live_source=NULL
@@ -577,7 +589,7 @@ class BettingService:
                          AND LOWER(COALESCE(live_phase,'')) IN
                          ('live','first_half','second_half','halftime','extra_time','penalties','suspended','kickoff_wait')"""
                 )
-                await self.db.set_setting("live_core_version", "16")
+                await self.db.set_setting("live_core_version", "17.0")
         except Exception:
             pass
 
@@ -651,73 +663,78 @@ class BettingService:
                 last_poll = self._last_live_score_poll.get(key)
                 force_api = hot and (last_poll is None or (now - last_poll).total_seconds() >= SETTINGS.live_poll_seconds)
 
-                # V16 LIVE CORE — rebuilt from zero.
-                # One authoritative live provider (SofaScore) + one independent
-                # fallback (ESPN). 5Dollar is deliberately NOT used in the live
-                # state machine anymore: it remains the odds/Bet365 provider only.
-                # Removing FotMob/TheSportsDB/livescoreFootball from the hot loop
-                # prevents cross-league contamination and conflicting clocks.
+                # V17 5DOLLAR-FIRST CORE.
+                # 5Dollar Pro is the canonical source whenever it supplies the data:
+                # fixture identity, competition, score, status/status_code minute,
+                # events, statistics and Bet365 odds. We DO NOT merge providers for
+                # an active fixture: fallbacks are used only if 5Dollar returns no
+                # usable row for this competition. This removes cross-provider clocks
+                # and wrong-league contamination.
                 import asyncio
 
-                async def _safe_live_call(label, coro, timeout=7.0):
+                async def _safe_live_call(label, coro, timeout=8.0):
                     try:
                         return await asyncio.wait_for(coro, timeout=timeout)
                     except Exception as exc:
                         try:
                             import logging
                             logging.getLogger("oddium").warning(
-                                "Live V16 %s indisponible pour %s: %s",
+                                "Live V17 %s indisponible pour %s: %s",
                                 label, COMPETITIONS.get(key, {}).get("name", key), exc
                             )
                         except Exception:
                             pass
                         return []
 
-                # ESPN is processed first. SofaScore is processed last and is
-                # authoritative when both identify the same fixture. The existing
-                # canonical matcher + monotonic phase/clock guards preserve a good
-                # ESPN clock if SofaScore temporarily omits one.
-                espn_task = _safe_live_call(
-                    "ESPN", self.odds_api.fetch_espn_scores(key, force=force_api or discovery_due), 7.0
-                )
-                sofa_task = _safe_live_call(
-                    "SofaScore", self.odds_api.fetch_sofascore_live_scores(key, force=force_api or discovery_due), 7.0
-                )
-                espn_rows, sofa_live_rows = await asyncio.gather(espn_task, sofa_task)
-
-                # Daily SofaScore is used only to catch terminal states for locally
-                # known fixtures; it is not mixed into active live discovery.
-                sofa_day_rows = []
-                if has_local_candidate or has_pending_bet:
-                    sofa_day_rows = await _safe_live_call(
-                        "SofaScore Day", self.odds_api.fetch_sofascore_scores(key, force=force_api or discovery_due), 7.0
+                five_rows = []
+                if SETTINGS.five_dollar_api_key:
+                    five_rows = await _safe_live_call(
+                        "5Dollar", self.odds_api.fetch_five_dollar_live(key, force=force_api or discovery_due), 8.0
                     )
 
-                raws = list(espn_rows or []) + list(sofa_day_rows or []) + list(sofa_live_rows or [])
-                sources = []
-                if sofa_live_rows:
-                    sources.append("SofaScore")
-                if espn_rows:
-                    sources.append("ESPN")
-                if sofa_day_rows:
-                    sources.append("SofaScore Day")
-                score_source = " + ".join(sources) if sources else "aucune donnée live"
+                if five_rows:
+                    raws = list(five_rows)
+                    score_source = "5DollarFootballAPI Pro"
+                else:
+                    # A provider is a fallback, never a co-author of the same live row.
+                    sofa_rows = await _safe_live_call(
+                        "SofaScore secours", self.odds_api.fetch_sofascore_live_scores(key, force=force_api or discovery_due), 7.0
+                    )
+                    if sofa_rows:
+                        raws = list(sofa_rows)
+                        score_source = "SofaScore secours"
+                    else:
+                        espn_rows = await _safe_live_call(
+                            "ESPN secours", self.odds_api.fetch_espn_scores(key, force=force_api or discovery_due), 7.0
+                        )
+                        raws = list(espn_rows or [])
+                        score_source = "ESPN secours" if raws else "aucune donnée live"
+
+                # Terminal-state recovery for a locally known match. Prefer a direct
+                # 5Dollar fixture read because its id is stable. Only if unavailable
+                # do we ask the independent result sources.
+                if not raws and (has_local_candidate or has_pending_bet):
+                    try:
+                        reconciled = await self._five_dollar_reconcile_rows(key)
+                    except Exception:
+                        reconciled = []
+                    if reconciled:
+                        raws = list(reconciled)
+                        score_source = "5DollarFootballAPI Pro • réconciliation"
+
+                if not raws and has_pending_bet:
+                    raws = await self.odds_api.fetch_scores(key, days_from=3, force=False)
+                    score_source = "football-data.org secours" if raws else "aucune donnée live"
+
                 try:
                     import logging
                     logging.getLogger("oddium").info(
-                        "Live V16 %s: Sofa=%s | ESPN=%s | SofaDay=%s | total=%s",
-                        COMPETITIONS.get(key, {}).get("name", key),
-                        len(sofa_live_rows or []), len(espn_rows or []),
-                        len(sofa_day_rows or []), len(raws or []),
+                        "Live V17 %s: source=%s | rows=%s",
+                        COMPETITIONS.get(key, {}).get("name", key), score_source, len(raws or [])
                     )
                 except Exception:
                     pass
 
-                # PropLine stays a last-resort settlement source only. It is not used
-                # for the fast live loop, so the free odds quota is preserved.
-                if not raws and has_pending_bet:
-                    raws = await self.odds_api.fetch_scores(key, days_from=3, force=False)
-                    score_source = "football-data.org secours" if raws else "aucune donnée live"
                 if force_api:
                     self._last_live_score_poll[key] = datetime.now(timezone.utc)
                 raws = self._sort_live_rows(list(raws or []), key)
@@ -1136,7 +1153,9 @@ class BettingService:
                 WHERE sport_key IN ({placeholders})
                   AND commence_time BETWEEN ? AND ?
                   AND (
-                       live_phase IN ('kickoff_wait','live','first_half','halftime','second_half','extra_time','penalties','suspended')
+                       (live_phase IN ('live','first_half','halftime','second_half','extra_time','penalties','suspended')
+                        AND (LOWER(COALESCE(live_source,'')) LIKE '%5dollar%' OR LOWER(COALESCE(live_source,'')) LIKE '%sofa%' OR LOWER(COALESCE(live_source,'')) LIKE '%espn%'))
+                       OR (live_phase='kickoff_wait' AND odds_available=1)
                        OR (live_phase IN ('finished','cancelled','postponed') AND last_score_update>=?)
                   )
                 ORDER BY completed ASC, commence_time ASC LIMIT ?""",
