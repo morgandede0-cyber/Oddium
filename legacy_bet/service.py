@@ -825,12 +825,28 @@ class BettingService:
                     if not self._phase_transition_allowed(old_phase, new_phase):
                         new_phase = old_phase
                         status = old_phase
-                    old_clock = str(old["live_clock"] or "")
+                    old_clock = str(old["live_clock"] or "").strip()
                     new_clock = str(event.get("live_clock") or "").strip()
-                    # A stopped phase must not inherit a stale running timer.
-                    # This fixes cases such as "MI-TEMPS · 81'".
-                    if new_phase in {"halftime", "finished", "postponed", "cancelled", "suspended", "penalties", "kickoff_wait"}:
+                    # V15.6: clocks are merged across providers instead of being erased.
+                    # 5Dollar sometimes confirms LIVE + score without returning a minute;
+                    # in that case keep the ESPN/SofaScore/FotMob minute already stored.
+                    stopped_phases = {"halftime", "finished", "postponed", "cancelled", "suspended", "penalties", "kickoff_wait"}
+                    if new_phase in stopped_phases:
                         new_clock = ""
+                    elif not new_clock and old_clock:
+                        new_clock = old_clock
+                    elif new_clock and old_clock and new_phase == old_phase:
+                        # Do not let a slower provider move the clock backwards.
+                        def _clock_minute(value):
+                            try:
+                                base = str(value).replace("'", "").split("+", 1)[0].strip()
+                                return int(float(base))
+                            except (TypeError, ValueError):
+                                return None
+                        old_min = _clock_minute(old_clock)
+                        new_min = _clock_minute(new_clock)
+                        if old_min is not None and new_min is not None and new_min < old_min:
+                            new_clock = old_clock
                     old_detail = str(old["live_detail"] or "")
                     new_detail = str(event.get("status_detail") or "")
                     score_changed = (hs_i is not None and old["home_score"] != hs_i) or (aws_i is not None and old["away_score"] != aws_i)
