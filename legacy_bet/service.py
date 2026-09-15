@@ -34,6 +34,8 @@ class BettingService:
         self._last_live_discovery: dict[str, datetime] = {}
         # Per-fixture throttle for direct 5Dollar reconciliation of stale kickoff rows.
         self._last_five_dollar_reconcile: dict[str, datetime] = {}
+        # Separate throttle for old fixtures that still have open tickets.
+        self._last_ticket_reconcile: dict[str, datetime] = {}
         self.last_live_events: list[dict] = []
 
     async def active_competitions(self) -> list[str]:
@@ -307,6 +309,69 @@ class BettingService:
                 continue
         return out
 
+    async def _reconcile_open_tickets(self) -> list[dict]:
+        """Settle forgotten tickets even after a match left the Live window.
+
+        V15 used the Live panel lookback to decide whether pending bets still needed
+        score work.  A ticket opened yesterday could therefore stay PENDING forever
+        once its fixture was no longer visible in Live.  This reconciliation is
+        deliberately independent from the Discord Live window.
+        """
+        now = datetime.now(timezone.utc)
+        oldest = (now - timedelta(days=7)).isoformat()
+        newest = (now - timedelta(minutes=90)).isoformat()
+        # Include simple tickets AND combo legs. DISTINCT prevents duplicate work.
+        rows = await self.db.fetchall(
+            """SELECT DISTINCT m.* FROM matches m
+               WHERE m.cancelled=0 AND m.commence_time BETWEEN ? AND ?
+                 AND (
+                   EXISTS(SELECT 1 FROM bets b WHERE b.event_id=m.event_id AND b.status='PENDING')
+                   OR EXISTS(SELECT 1 FROM combo_legs cl JOIN combo_bets cb ON cb.id=cl.combo_id
+                             WHERE cl.event_id=m.event_id AND cl.status='PENDING' AND cb.status='PENDING')
+                 )
+               ORDER BY m.commence_time ASC LIMIT 20""",
+            (oldest, newest),
+        )
+        settlements: list[dict] = []
+        for row in rows:
+            event_id = str(row["event_id"])
+            # If another provider already marked the match complete, settle directly
+            # from the stored final score. This also repairs tickets after a crash.
+            if int(row["completed"] or 0) and row["home_score"] is not None and row["away_score"] is not None:
+                settlements.extend(await self.settle_event(event_id, int(row["home_score"]), int(row["away_score"])))
+                continue
+
+            five_id = row["five_dollar_fixture_id"] if "five_dollar_fixture_id" in row.keys() else None
+            if not (SETTINGS.five_dollar_api_key and five_id):
+                continue
+            last = self._last_ticket_reconcile.get(event_id)
+            if last and (now - last).total_seconds() < 300:
+                continue
+            self._last_ticket_reconcile[event_id] = now
+            try:
+                details = await self.odds_api.fetch_five_dollar_details(int(five_id), force=True)
+                shell = (details or {}).get("fixture") or {}
+                parsed = self.odds_api.parse_score_shell(shell, str(row["sport_key"])) if shell else None
+                if not parsed or str(parsed.get("status") or "").lower() != "finished":
+                    continue
+                hs = parsed.get("home_score")
+                aws = parsed.get("away_score")
+                if hs is None or aws is None:
+                    continue
+                hs_i, aws_i = int(hs), int(aws)
+                await self.db.execute(
+                    """UPDATE matches SET home_score=?,away_score=?,completed=1,cancelled=0,
+                       match_status='finished',live_phase='finished',live_clock=NULL,
+                       live_source=COALESCE(?,live_source),last_score_update=? WHERE event_id=?""",
+                    (hs_i, aws_i, parsed.get("source") or "5DollarFootballAPI", utcnow_iso(), event_id),
+                )
+                settlements.extend(await self.settle_event(event_id, hs_i, aws_i))
+            except Exception:
+                # The normal multi-source collector remains available; one bad direct
+                # lookup must never stop settlement of the other tickets.
+                continue
+        return settlements
+
     async def _promote_scheduled_kickoffs(self) -> list[dict]:
         """Make a fixture visible the instant its scheduled kickoff is reached.
 
@@ -435,6 +500,12 @@ class BettingService:
             score_updates += len(kickoff_events)
         except Exception:
             kickoff_events = []
+        # Ticket settlement must NOT depend on the Live panel lookback. Reconcile
+        # yesterday's/older open tickets before scanning currently visible matches.
+        try:
+            settlements.extend(await self._reconcile_open_tickets())
+        except Exception as exc:
+            errors.append(f"Réconciliation tickets: {exc}")
         from_time = (now - timedelta(minutes=SETTINGS.live_panel_lookback_minutes)).isoformat()
         to_time = (now + timedelta(minutes=SETTINGS.live_panel_lookahead_minutes)).isoformat()
 
