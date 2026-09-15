@@ -523,7 +523,7 @@ class OddsAPI:
         self._write_cache(cache_path, params, rows)
         return rows
 
-    async def fetch_espn_scores(self, sport_key: str, *, force: bool = False):
+    async def fetch_espn_scores(self, sport_key: str, *, force: bool = False, date=None):
         """Fetch today's scoreboard from ESPN's public JSON endpoint.
 
         This endpoint is credential-free and is used for the permanent live panel,
@@ -534,7 +534,11 @@ class OddsAPI:
         if not league:
             return []
 
-        day = datetime.now(timezone.utc).strftime("%Y%m%d")
+        day = (date or datetime.now(timezone.utc).date())
+        if hasattr(day, "strftime"):
+            day = day.strftime("%Y%m%d")
+        else:
+            day = str(day).replace("-", "")
         cache_path = f"espn_scores:{league}:{day}"
         params = {"dates": day}
         ttl = min(45, max(15, int(SETTINGS.scores_cache_seconds)))
@@ -996,7 +1000,7 @@ class OddsAPI:
             })
         return rows
 
-    async def fetch_sofascore_scores(self, sport_key: str, *, force: bool = False):
+    async def fetch_sofascore_scores(self, sport_key: str, *, force: bool = False, date=None):
         """Credential-free fallback for live discovery across all Oddium leagues.
 
         The endpoint returns every football event for the local calendar day.
@@ -1011,7 +1015,8 @@ class OddsAPI:
         # Query UTC yesterday/today/tomorrow around midnight boundaries.  The
         # currently requested daily feed is normally enough, but using the local
         # UTC date is safe for all European competitions at match time.
-        day = datetime.now(timezone.utc).date().isoformat()
+        day = date or datetime.now(timezone.utc).date()
+        day = day.isoformat() if hasattr(day, "isoformat") else str(day)
         cache_path = f"sofascore_football_day:{day}"
         params: dict = {}
         ttl = max(3, min(12, int(SETTINGS.live_poll_seconds)))
@@ -1019,7 +1024,7 @@ class OddsAPI:
 
         # Even when several competitions request force=True in one score loop,
         # hit Sofascore at most once every ~3 seconds and share the payload.
-        if self._sofascore_last_fetch_monotonic > 0 and (now_mono - self._sofascore_last_fetch_monotonic) < 30.0:
+        if date is None and self._sofascore_last_fetch_monotonic > 0 and (now_mono - self._sofascore_last_fetch_monotonic) < 30.0:
             all_rows = self._sofascore_day_rows
         else:
             all_rows = None

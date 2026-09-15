@@ -310,17 +310,14 @@ class BettingService:
         return out
 
     async def _reconcile_open_tickets(self) -> list[dict]:
-        """Recover every unresolved ticket from recent completed fixtures.
+        """Resolve old pending tickets independently from the 5Dollar live engine.
 
-        V15.2 could only repair legacy tickets that already had a
-        five_dollar_fixture_id. Older bets often predate that mapping, so they were
-        silently skipped. V15.3 first uses a stored final score, then a direct 5$
-        fixture id, and finally discovers the historical 5$ result by team names +
-        kickoff time and permanently backfills the fixture id.
+        Result priority is deliberately separate from the odds provider:
+        football-data.org -> Sofascore -> ESPN/FotMob/TheSportsDB -> 5Dollar last resort.
+        This prevents a missing 5Dollar historical fixture from blocking settlement.
         """
         now = datetime.now(timezone.utc)
         oldest = (now - timedelta(days=7)).isoformat()
-        # Give a normal match enough time to finish, but don't depend on Live UI.
         newest = (now - timedelta(minutes=105)).isoformat()
         rows = await self.db.fetchall(
             """SELECT DISTINCT m.* FROM matches m
@@ -334,13 +331,13 @@ class BettingService:
             (oldest, newest),
         )
         settlements: list[dict] = []
-        historical: dict[str, list[dict]] = {}
+        result_feeds: dict[str, list[dict]] = {}
 
         async def finish(row, parsed):
             event_id = str(row["event_id"])
             hs, aws = parsed.get("home_score"), parsed.get("away_score")
             if hs is None or aws is None:
-                return
+                return False
             hs_i, aws_i = int(hs), int(aws)
             fid = parsed.get("five_dollar_fixture_id")
             await self.db.execute(
@@ -348,67 +345,95 @@ class BettingService:
                    match_status='finished',live_phase='finished',live_clock=NULL,
                    live_source=COALESCE(?,live_source),five_dollar_fixture_id=COALESCE(?,five_dollar_fixture_id),
                    last_score_update=? WHERE event_id=?""",
-                (hs_i, aws_i, parsed.get("source") or "5DollarFootballAPI", fid, utcnow_iso(), event_id),
+                (hs_i, aws_i, parsed.get("source") or "Result fallback", fid, utcnow_iso(), event_id),
             )
             settlements.extend(await self.settle_event(event_id, hs_i, aws_i))
+            return True
+
+        def match_candidate(row, shell):
+            # Always normalize provider shells before deciding whether a match is final.
+            # ESPN/Sofascore/FotMob do not all use the literal word "finished".
+            parsed = self.odds_api.parse_score_shell(shell, str(row["sport_key"])) or shell
+            if str(parsed.get("status") or "").lower() != "finished":
+                return None
+            shell = parsed
+            normal = (self._teams_equivalent(row["home_team"], shell.get("home_team")) and
+                      self._teams_equivalent(row["away_team"], shell.get("away_team")))
+            reversed_teams = (self._teams_equivalent(row["home_team"], shell.get("away_team")) and
+                              self._teams_equivalent(row["away_team"], shell.get("home_team")))
+            if not normal and not reversed_teams:
+                return None
+            try:
+                a = datetime.fromisoformat(str(row["commence_time"]).replace("Z", "+00:00"))
+                b = datetime.fromisoformat(str(shell.get("commence_time") or "").replace("Z", "+00:00"))
+                if a.tzinfo is None: a = a.replace(tzinfo=timezone.utc)
+                if b.tzinfo is None: b = b.replace(tzinfo=timezone.utc)
+                delta = abs((a - b).total_seconds())
+            except Exception:
+                delta = 0
+            if delta > 12 * 3600:
+                return None
+            if reversed_teams:
+                shell = dict(shell)
+                shell["home_score"], shell["away_score"] = shell.get("away_score"), shell.get("home_score")
+            return delta, shell
 
         for row in rows:
             event_id = str(row["event_id"])
             if int(row["completed"] or 0) and row["home_score"] is not None and row["away_score"] is not None:
                 settlements.extend(await self.settle_event(event_id, int(row["home_score"]), int(row["away_score"])))
                 continue
-            if not SETTINGS.five_dollar_api_key:
-                continue
             last = self._last_ticket_reconcile.get(event_id)
             if last and (now - last).total_seconds() < 120:
                 continue
             self._last_ticket_reconcile[event_id] = now
+            sport_key = str(row["sport_key"])
 
-            five_id = row["five_dollar_fixture_id"] if "five_dollar_fixture_id" in row.keys() else None
-            if five_id:
+            # Build one independent result feed per competition. football-data.org is
+            # first when configured; public score providers supplement it. 5Dollar is
+            # intentionally LAST and is no longer required to settle a ticket.
+            if sport_key not in result_feeds:
+                feed: list[dict] = []
                 try:
-                    details = await self.odds_api.fetch_five_dollar_details(int(five_id), force=True)
-                    shell = (details or {}).get("fixture") or {}
-                    parsed = self.odds_api.parse_score_shell(shell, str(row["sport_key"])) if shell else None
-                    if parsed and str(parsed.get("status") or "").lower() == "finished":
-                        await finish(row, parsed)
-                        continue
+                    feed.extend(await self.odds_api.fetch_scores(sport_key, days_from=7, force=True) or [])
                 except Exception:
                     pass
+                # Historical settlement is intentionally independent from 5Dollar.
+                # Query the actual calendar days of unresolved tickets, not only today's
+                # scoreboard (the old bug that left yesterday's matches orange).
+                for days_ago in range(0, 8):
+                    target_day = (now - timedelta(days=days_ago)).date()
+                    for method_name in ("fetch_sofascore_scores", "fetch_espn_scores"):
+                        try:
+                            method = getattr(self.odds_api, method_name, None)
+                            if method:
+                                feed.extend(await method(sport_key, force=True, date=target_day) or [])
+                        except Exception:
+                            pass
+                # Extra current-day fallbacks remain useful, but settlement does not
+                # require them and never requires 5Dollar.
+                for method_name in ("fetch_fotmob_scores", "fetch_thesportsdb_scores"):
+                    try:
+                        method = getattr(self.odds_api, method_name, None)
+                        if method:
+                            feed.extend(await method(sport_key, force=True) or [])
+                    except Exception:
+                        pass
+                result_feeds[sport_key] = feed
 
-            # Critical legacy fallback: tickets created before the 5$ fixture-id
-            # mapping are matched against the recent FINISHED feed.
-            sport_key = str(row["sport_key"])
-            if sport_key not in historical:
-                try:
-                    historical[sport_key] = await self.odds_api.fetch_five_dollar_finished(sport_key, days=7)
-                except Exception:
-                    historical[sport_key] = []
-            try:
-                target_dt = datetime.fromisoformat(str(row["commence_time"]).replace("Z", "+00:00"))
-                if target_dt.tzinfo is None:
-                    target_dt = target_dt.replace(tzinfo=timezone.utc)
-            except Exception:
-                target_dt = None
             candidates = []
-            for shell in historical[sport_key]:
-                if not (self._teams_equivalent(row["home_team"], shell.get("home_team")) and
-                        self._teams_equivalent(row["away_team"], shell.get("away_team"))):
-                    continue
-                try:
-                    dt = datetime.fromisoformat(str(shell.get("commence_time") or "").replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    delta = abs((dt - target_dt).total_seconds()) if target_dt else 0
-                except Exception:
-                    delta = 999999
-                if delta <= 8 * 3600:
-                    candidates.append((delta, shell))
+            for shell in result_feeds[sport_key]:
+                found = match_candidate(row, shell)
+                if found:
+                    candidates.append(found)
             if candidates:
                 candidates.sort(key=lambda x: x[0])
-                parsed = self.odds_api.parse_score_shell(candidates[0][1], sport_key)
-                if parsed and str(parsed.get("status") or "").lower() == "finished":
-                    await finish(row, parsed)
+                if await finish(row, candidates[0][1]):
+                    continue
+
+            # No 5Dollar fallback here by design: final-result settlement is
+            # isolated from the odds/live provider. Unresolved tickets remain pending
+            # until an independent result source confirms the final score.
         return settlements
 
     async def reconcile_open_tickets(self) -> list[dict]:
