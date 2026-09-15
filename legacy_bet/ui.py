@@ -1516,6 +1516,11 @@ class BrowseMatchSelect(discord.ui.Select):
 
 
 async def _my_bets_embed(service, user_id):
+    # V15.3: opening Mes tickets also repairs stale PENDING results immediately.
+    try:
+        await service.reconcile_open_tickets()
+    except Exception:
+        pass
     simple = await service.user_bets(user_id, None, 20)
     combos = await service.user_combo_bets(user_id, 10)
     pending_count = sum(1 for b in simple if str(b["status"]) == "PENDING") + sum(1 for c, _ in combos if str(c["status"]) == "PENDING")

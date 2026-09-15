@@ -310,17 +310,18 @@ class BettingService:
         return out
 
     async def _reconcile_open_tickets(self) -> list[dict]:
-        """Settle forgotten tickets even after a match left the Live window.
+        """Recover every unresolved ticket from recent completed fixtures.
 
-        V15 used the Live panel lookback to decide whether pending bets still needed
-        score work.  A ticket opened yesterday could therefore stay PENDING forever
-        once its fixture was no longer visible in Live.  This reconciliation is
-        deliberately independent from the Discord Live window.
+        V15.2 could only repair legacy tickets that already had a
+        five_dollar_fixture_id. Older bets often predate that mapping, so they were
+        silently skipped. V15.3 first uses a stored final score, then a direct 5$
+        fixture id, and finally discovers the historical 5$ result by team names +
+        kickoff time and permanently backfills the fixture id.
         """
         now = datetime.now(timezone.utc)
         oldest = (now - timedelta(days=7)).isoformat()
-        newest = (now - timedelta(minutes=90)).isoformat()
-        # Include simple tickets AND combo legs. DISTINCT prevents duplicate work.
+        # Give a normal match enough time to finish, but don't depend on Live UI.
+        newest = (now - timedelta(minutes=105)).isoformat()
         rows = await self.db.fetchall(
             """SELECT DISTINCT m.* FROM matches m
                WHERE m.cancelled=0 AND m.commence_time BETWEEN ? AND ?
@@ -329,48 +330,90 @@ class BettingService:
                    OR EXISTS(SELECT 1 FROM combo_legs cl JOIN combo_bets cb ON cb.id=cl.combo_id
                              WHERE cl.event_id=m.event_id AND cl.status='PENDING' AND cb.status='PENDING')
                  )
-               ORDER BY m.commence_time ASC LIMIT 20""",
+               ORDER BY m.commence_time ASC LIMIT 50""",
             (oldest, newest),
         )
         settlements: list[dict] = []
+        historical: dict[str, list[dict]] = {}
+
+        async def finish(row, parsed):
+            event_id = str(row["event_id"])
+            hs, aws = parsed.get("home_score"), parsed.get("away_score")
+            if hs is None or aws is None:
+                return
+            hs_i, aws_i = int(hs), int(aws)
+            fid = parsed.get("five_dollar_fixture_id")
+            await self.db.execute(
+                """UPDATE matches SET home_score=?,away_score=?,completed=1,cancelled=0,
+                   match_status='finished',live_phase='finished',live_clock=NULL,
+                   live_source=COALESCE(?,live_source),five_dollar_fixture_id=COALESCE(?,five_dollar_fixture_id),
+                   last_score_update=? WHERE event_id=?""",
+                (hs_i, aws_i, parsed.get("source") or "5DollarFootballAPI", fid, utcnow_iso(), event_id),
+            )
+            settlements.extend(await self.settle_event(event_id, hs_i, aws_i))
+
         for row in rows:
             event_id = str(row["event_id"])
-            # If another provider already marked the match complete, settle directly
-            # from the stored final score. This also repairs tickets after a crash.
             if int(row["completed"] or 0) and row["home_score"] is not None and row["away_score"] is not None:
                 settlements.extend(await self.settle_event(event_id, int(row["home_score"]), int(row["away_score"])))
                 continue
-
-            five_id = row["five_dollar_fixture_id"] if "five_dollar_fixture_id" in row.keys() else None
-            if not (SETTINGS.five_dollar_api_key and five_id):
+            if not SETTINGS.five_dollar_api_key:
                 continue
             last = self._last_ticket_reconcile.get(event_id)
-            if last and (now - last).total_seconds() < 300:
+            if last and (now - last).total_seconds() < 120:
                 continue
             self._last_ticket_reconcile[event_id] = now
+
+            five_id = row["five_dollar_fixture_id"] if "five_dollar_fixture_id" in row.keys() else None
+            if five_id:
+                try:
+                    details = await self.odds_api.fetch_five_dollar_details(int(five_id), force=True)
+                    shell = (details or {}).get("fixture") or {}
+                    parsed = self.odds_api.parse_score_shell(shell, str(row["sport_key"])) if shell else None
+                    if parsed and str(parsed.get("status") or "").lower() == "finished":
+                        await finish(row, parsed)
+                        continue
+                except Exception:
+                    pass
+
+            # Critical legacy fallback: tickets created before the 5$ fixture-id
+            # mapping are matched against the recent FINISHED feed.
+            sport_key = str(row["sport_key"])
+            if sport_key not in historical:
+                try:
+                    historical[sport_key] = await self.odds_api.fetch_five_dollar_finished(sport_key, days=7)
+                except Exception:
+                    historical[sport_key] = []
             try:
-                details = await self.odds_api.fetch_five_dollar_details(int(five_id), force=True)
-                shell = (details or {}).get("fixture") or {}
-                parsed = self.odds_api.parse_score_shell(shell, str(row["sport_key"])) if shell else None
-                if not parsed or str(parsed.get("status") or "").lower() != "finished":
-                    continue
-                hs = parsed.get("home_score")
-                aws = parsed.get("away_score")
-                if hs is None or aws is None:
-                    continue
-                hs_i, aws_i = int(hs), int(aws)
-                await self.db.execute(
-                    """UPDATE matches SET home_score=?,away_score=?,completed=1,cancelled=0,
-                       match_status='finished',live_phase='finished',live_clock=NULL,
-                       live_source=COALESCE(?,live_source),last_score_update=? WHERE event_id=?""",
-                    (hs_i, aws_i, parsed.get("source") or "5DollarFootballAPI", utcnow_iso(), event_id),
-                )
-                settlements.extend(await self.settle_event(event_id, hs_i, aws_i))
+                target_dt = datetime.fromisoformat(str(row["commence_time"]).replace("Z", "+00:00"))
+                if target_dt.tzinfo is None:
+                    target_dt = target_dt.replace(tzinfo=timezone.utc)
             except Exception:
-                # The normal multi-source collector remains available; one bad direct
-                # lookup must never stop settlement of the other tickets.
-                continue
+                target_dt = None
+            candidates = []
+            for shell in historical[sport_key]:
+                if not (self._teams_equivalent(row["home_team"], shell.get("home_team")) and
+                        self._teams_equivalent(row["away_team"], shell.get("away_team"))):
+                    continue
+                try:
+                    dt = datetime.fromisoformat(str(shell.get("commence_time") or "").replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    delta = abs((dt - target_dt).total_seconds()) if target_dt else 0
+                except Exception:
+                    delta = 999999
+                if delta <= 8 * 3600:
+                    candidates.append((delta, shell))
+            if candidates:
+                candidates.sort(key=lambda x: x[0])
+                parsed = self.odds_api.parse_score_shell(candidates[0][1], sport_key)
+                if parsed and str(parsed.get("status") or "").lower() == "finished":
+                    await finish(row, parsed)
         return settlements
+
+    async def reconcile_open_tickets(self) -> list[dict]:
+        """Public entry point used by the ticket screen for immediate self-healing."""
+        return await self._reconcile_open_tickets()
 
     async def _promote_scheduled_kickoffs(self) -> list[dict]:
         """Make a fixture visible the instant its scheduled kickoff is reached.

@@ -188,6 +188,9 @@ class OddsAPI:
     async def fetch_five_dollar_details(self, fixture_id: int, *, force: bool = False):
         return await self.five_dollar.fixture_details(fixture_id, force=force)
 
+    async def fetch_five_dollar_finished(self, sport_key: str, *, days: int = 7):
+        return await self.five_dollar.finished_shells(sport_key, days=days)
+
     @staticmethod
     def _cache_key(path: str, params: dict | None) -> str:
         import hashlib

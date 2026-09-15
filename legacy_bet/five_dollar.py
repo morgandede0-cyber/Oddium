@@ -469,6 +469,39 @@ class FiveDollarClient:
         self._fixtures_cache[sport_key] = (time.monotonic(), rows)
         return list(rows)
 
+    async def finished_shells(self, sport_key: str, *, days: int = 7) -> list[dict[str, Any]]:
+        """Fetch recent completed fixtures for ticket recovery.
+
+        Unlike fixture_shells(), this deliberately queries the historical window and
+        status=finished. It is used only for unresolved bets, not the normal UI feed.
+        """
+        if not self.enabled or sport_key not in self.LEAGUES:
+            return []
+        now = datetime.now(timezone.utc)
+        start = int((now - timedelta(days=max(1, days))).timestamp())
+        end = int(now.timestamp())
+        await self._ensure_league_ids()
+        rows: list[dict[str, Any]] = []
+        for league_id in self._league_ids.get(sport_key) or self.LEAGUES[sport_key].ids:
+            page = 1
+            while page <= 4:
+                payload = await self._get(
+                    f"/leagues/{league_id}/fixtures",
+                    {"status": "finished", "start_time": start, "end_time": end,
+                     "lang": "fr", "page": page, "per_page": 50},
+                )
+                if payload is None:
+                    break
+                for item in payload.get("data") or []:
+                    shell = self._fixture_to_shell(item)
+                    if shell:
+                        rows.append(shell)
+                pagination = payload.get("pagination") or {}
+                if not pagination.get("has_more"):
+                    break
+                page += 1
+        return rows
+
     async def fixture_details(self, fixture_id: int, *, force: bool = False) -> dict[str, Any]:
         if not self.enabled:
             return {}
