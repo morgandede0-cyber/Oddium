@@ -271,7 +271,7 @@ class BettingService:
             )
         return len(rows)
 
-    async def _five_dollar_reconcile_rows(self, sport_key: str) -> list[dict]:
+    async def _five_dollar_reconcile_rows(self, sport_key: str, exclude_fixture_ids: set[int] | None = None) -> list[dict]:
         """Ask 5Dollar directly for stale scheduled rows that should already be live/finished.
 
         The global ``status=live`` endpoint stops returning a fixture once it is over.
@@ -283,25 +283,32 @@ class BettingService:
             return []
         now = datetime.now(timezone.utc)
         lo = (now - timedelta(hours=4)).isoformat()
-        hi = (now - timedelta(minutes=15)).isoformat()
+        hi = now.isoformat()
         rows = await self.db.fetchall(
             """SELECT event_id,five_dollar_fixture_id FROM matches
                WHERE sport_key=? AND completed=0 AND cancelled=0
-                 AND live_phase='kickoff_wait'
+                 AND COALESCE(live_phase,'pending') IN ('pending','kickoff_wait')
                  AND five_dollar_fixture_id IS NOT NULL
                  AND commence_time BETWEEN ? AND ?
-               ORDER BY commence_time ASC LIMIT 4""",
+               ORDER BY commence_time ASC LIMIT 6""",
             (sport_key, lo, hi),
         )
+        exclude_fixture_ids = exclude_fixture_ids or set()
         out: list[dict] = []
         for row in rows:
+            try:
+                fixture_id = int(row["five_dollar_fixture_id"])
+            except (TypeError, ValueError):
+                continue
+            if fixture_id in exclude_fixture_ids:
+                continue
             event_id = str(row["event_id"] or "")
             last = self._last_five_dollar_reconcile.get(event_id)
             if last and (now - last).total_seconds() < 300:
                 continue
             self._last_five_dollar_reconcile[event_id] = now
             try:
-                details = await self.odds_api.fetch_five_dollar_details(int(row["five_dollar_fixture_id"]), force=True)
+                details = await self.odds_api.fetch_five_dollar_details(fixture_id, force=True)
                 shell = (details or {}).get("fixture") or {}
                 if shell:
                     out.append(shell)
@@ -453,41 +460,18 @@ class BettingService:
         return await self._reconcile_open_tickets()
 
     async def _promote_scheduled_kickoffs(self) -> list[dict]:
-        """Make a fixture visible the instant its scheduled kickoff is reached.
+        """V18 never invents LIVE from scheduled kickoff.
 
-        Public score feeds can confirm IN_PLAY a few minutes late.  Instead of hiding
-        the fixture until the first score/status change, Oddium enters a temporary
-        `kickoff_wait` phase.  A real provider replaces it as soon as it confirms live.
+        Also removes legacy kickoff_wait states created by older Oddium builds; the
+        real 5Dollar observation in the same collector cycle can then promote the
+        fixture to first_half/second_half/halftime/finished.
         """
-        now = datetime.now(timezone.utc)
-        lo = (now - timedelta(minutes=150)).isoformat()
-        hi = now.isoformat()
-        rows = await self.db.fetchall(
-            """SELECT * FROM matches
-               WHERE completed=0 AND cancelled=0
-                 AND commence_time BETWEEN ? AND ?
-                 AND COALESCE(live_phase,'pending')='pending'""",
-            (lo, hi),
+        await self.db.execute(
+            """UPDATE matches SET live_phase='pending',match_status='pending',
+               live_clock=NULL,live_detail=NULL,live_source=NULL
+               WHERE completed=0 AND cancelled=0 AND live_phase='kickoff_wait'"""
         )
-        out: list[dict] = []
-        for row in rows:
-            event_id = str(row["event_id"])
-            await self.db.execute(
-                """UPDATE matches SET live_phase='kickoff_wait', match_status='kickoff_wait',
-                   live_clock=COALESCE(live_clock,?),
-                   live_detail='Coup d’envoi prévu • confirmation live en attente',
-                   live_source='Horloge Oddium', last_score_update=? WHERE event_id=?""",
-                ("0'", utcnow_iso(), event_id),
-            )
-            out.append({
-                "type": "match_started", "event_id": event_id,
-                "home_team": row["home_team"], "away_team": row["away_team"],
-                "home_score": row["home_score"], "away_score": row["away_score"],
-                "phase": "kickoff_wait", "previous_phase": "pending", "clock": "0'",
-                "detail": "Coup d’envoi prévu • confirmation live en attente",
-                "source": "Horloge Oddium",
-            })
-        return out
+        return []
 
     def _sort_live_rows(self, raws: list[dict], sport_key: str) -> list[dict]:
         """Process weak/pending observations first and authoritative live states last.
@@ -694,6 +678,16 @@ class BettingService:
 
                 if five_rows:
                     raws = list(five_rows)
+                    live_ids = {int(r.get("five_dollar_fixture_id")) for r in raws if r.get("five_dollar_fixture_id") is not None}
+                    # Verify only locally-known started fixtures missing from the global
+                    # live page. This uses the exact 5Dollar fixture id and native
+                    # status_code; no team-name or kickoff-time guess is involved.
+                    try:
+                        direct_rows = await self._five_dollar_reconcile_rows(key, exclude_fixture_ids=live_ids)
+                    except Exception:
+                        direct_rows = []
+                    if direct_rows:
+                        raws.extend(direct_rows)
                     score_source = "5DollarFootballAPI Pro"
                 else:
                     # A provider is a fallback, never a co-author of the same live row.

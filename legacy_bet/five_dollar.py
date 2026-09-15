@@ -263,6 +263,7 @@ class FiveDollarClient:
                 return "first_half"
             return "live"
         if raw == "unknown":
+            # Unknown is deliberately non-terminal: never settle/void from it.
             return "suspended"
         return "pending"
 
@@ -393,6 +394,15 @@ class FiveDollarClient:
             "provider_stats": item.get("statistics") or item.get("stats") or {},
             "corners": item.get("corners") or {},
             "cards": item.get("cards") or {},
+            # Keep every useful native 5Dollar field available to the Match Center.
+            # The main Live panel stays visually unchanged; richer fields are consumed
+            # by Details/Stats/Market and diagnostics instead of being thrown away.
+            "provider_round": item.get("round"),
+            "league_season_id": item.get("league_season_id"),
+            "status_code": item.get("status_code"),
+            "status_reason": item.get("status_reason"),
+            "half_score": {"home": goals.get("half_home"), "away": goals.get("half_away")},
+            "provider_payload": item,
         }
 
     async def live_shells(self, sport_key: str, *, force: bool = False) -> list[dict[str, Any]]:
