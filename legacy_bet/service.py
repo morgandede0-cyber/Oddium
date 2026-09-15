@@ -541,8 +541,9 @@ class BettingService:
         - Pending bets near kickoff always trigger a competition score refresh.
         - If the live panel is installed, competitions with a match inside the live
           window are also refreshed, even when nobody has bet on them.
-        - 5Dollar is globally cached, so six competition filters share one live
-          request inside FIVE_DOLLAR_POLL_SECONDS.
+        - SofaScore is the authoritative live state/clock source.
+        - ESPN is the only live fallback.
+        - 5Dollar is reserved for Bet365 odds and never drives the live state.
         """
         active = await self.active_competitions()
         score_updates = 0
@@ -562,6 +563,24 @@ class BettingService:
             edetail = " ".join(str(detail or "").strip().lower().split())
             return (str(event_id or ""), etype, eclock, edetail)
         now = datetime.now(timezone.utc)
+
+        # One-time V16 sanitation: old releases mixed six providers in the same
+        # state machine. Clear only transient LIVE state produced by retired live
+        # sources; fixtures, odds, bets and finished results are preserved.
+        try:
+            core_version = await self.db.get_setting("live_core_version")
+            if core_version != "16":
+                await self.db.execute(
+                    """UPDATE matches SET match_status='pending', live_phase='pending',
+                       live_clock=NULL, live_detail=NULL, live_source=NULL
+                       WHERE completed=0 AND cancelled=0
+                         AND LOWER(COALESCE(live_phase,'')) IN
+                         ('live','first_half','second_half','halftime','extra_time','penalties','suspended','kickoff_wait')"""
+                )
+                await self.db.set_setting("live_core_version", "16")
+        except Exception:
+            pass
+
         try:
             kickoff_events = await self._promote_scheduled_kickoffs()
             live_events.extend(kickoff_events)
@@ -632,10 +651,12 @@ class BettingService:
                 last_poll = self._last_live_score_poll.get(key)
                 force_api = hot and (last_poll is None or (now - last_poll).total_seconds() >= SETTINGS.live_poll_seconds)
 
-                # V9.0.8: never let one free source block the complete Live scan.
-                # The three providers are queried in parallel with short independent
-                # timeouts. livescoreFootball is only used for EPL/LaLiga where the
-                # public project is verified; ESPN + SofaScore cover all 6 leagues.
+                # V16 LIVE CORE — rebuilt from zero.
+                # One authoritative live provider (SofaScore) + one independent
+                # fallback (ESPN). 5Dollar is deliberately NOT used in the live
+                # state machine anymore: it remains the odds/Bet365 provider only.
+                # Removing FotMob/TheSportsDB/livescoreFootball from the hot loop
+                # prevents cross-league contamination and conflicting clocks.
                 import asyncio
 
                 async def _safe_live_call(label, coro, timeout=7.0):
@@ -644,92 +665,50 @@ class BettingService:
                     except Exception as exc:
                         try:
                             import logging
-                            logging.getLogger("oddium").warning("Live source %s indisponible pour %s: %s", label, COMPETITIONS.get(key, {}).get("name", key), exc)
+                            logging.getLogger("oddium").warning(
+                                "Live V16 %s indisponible pour %s: %s",
+                                label, COMPETITIONS.get(key, {}).get("name", key), exc
+                            )
                         except Exception:
                             pass
                         return []
 
-                try:
-                    import logging
-                    logging.getLogger("oddium").info("Live scan démarré: %s", COMPETITIONS.get(key, {}).get("name", key))
-                except Exception:
-                    pass
-                five_dollar_task = _safe_live_call(
-                    "5DollarFootballAPI",
-                    self.odds_api.fetch_five_dollar_live(key, force=force_api or discovery_due),
-                    10.0,
-                )
-                open_task = _safe_live_call(
-                    "livescoreFootball",
-                    self.odds_api.fetch_open_source_scores(key, force=force_api or discovery_due),
-                    6.0,
-                )
+                # ESPN is processed first. SofaScore is processed last and is
+                # authoritative when both identify the same fixture. The existing
+                # canonical matcher + monotonic phase/clock guards preserve a good
+                # ESPN clock if SofaScore temporarily omits one.
                 espn_task = _safe_live_call(
-                    "ESPN",
-                    self.odds_api.fetch_espn_scores(key, force=force_api or discovery_due),
-                    6.0,
+                    "ESPN", self.odds_api.fetch_espn_scores(key, force=force_api or discovery_due), 7.0
                 )
                 sofa_task = _safe_live_call(
-                    "SofaScore Live",
-                    self.odds_api.fetch_sofascore_live_scores(key, force=force_api or discovery_due),
-                    6.0,
+                    "SofaScore", self.odds_api.fetch_sofascore_live_scores(key, force=force_api or discovery_due), 7.0
                 )
-                fotmob_task = _safe_live_call(
-                    "FotMob",
-                    self.odds_api.fetch_fotmob_scores(key, force=force_api or discovery_due),
-                    6.0,
-                )
-                sportsdb_task = _safe_live_call(
-                    "TheSportsDB",
-                    self.odds_api.fetch_thesportsdb_scores(key, force=force_api or discovery_due),
-                    6.0,
-                )
-                five_dollar_rows, open_rows, espn_rows, sofa_live_rows, fotmob_rows, sportsdb_rows = await asyncio.gather(
-                    five_dollar_task, open_task, espn_task, sofa_task, fotmob_task, sportsdb_task
-                )
+                espn_rows, sofa_live_rows = await asyncio.gather(espn_task, sofa_task)
 
-                sofa_rows = []
-                if not sofa_live_rows:
-                    sofa_rows = await _safe_live_call(
-                        "SofaScore Day",
-                        self.odds_api.fetch_sofascore_scores(key, force=force_api or discovery_due),
-                        6.0,
+                # Daily SofaScore is used only to catch terminal states for locally
+                # known fixtures; it is not mixed into active live discovery.
+                sofa_day_rows = []
+                if has_local_candidate or has_pending_bet:
+                    sofa_day_rows = await _safe_live_call(
+                        "SofaScore Day", self.odds_api.fetch_sofascore_scores(key, force=force_api or discovery_due), 7.0
                     )
 
-                raws = list(open_rows or []) + list(espn_rows or []) + list(fotmob_rows or []) + list(sportsdb_rows or []) + list(sofa_rows or []) + list(sofa_live_rows or []) + list(five_dollar_rows or [])
-                # V13.2: reconcile scheduled rows that 5Dollar no longer returns in
-                # ``status=live`` (for example when Oddium missed the transition and
-                # the match is already finished).  The direct fixture endpoint is
-                # throttled per match and feeds the exact same canonical update path.
-                try:
-                    raws.extend(await self._five_dollar_reconcile_rows(key))
-                except Exception:
-                    pass
+                raws = list(espn_rows or []) + list(sofa_day_rows or []) + list(sofa_live_rows or [])
                 sources = []
-                if five_dollar_rows:
-                    sources.append("5Dollar")
-                if open_rows:
-                    sources.append("livescoreFootball")
+                if sofa_live_rows:
+                    sources.append("SofaScore")
                 if espn_rows:
                     sources.append("ESPN")
-                if fotmob_rows:
-                    sources.append("FotMob")
-                if sportsdb_rows:
-                    sources.append("TheSportsDB")
-                if sofa_live_rows:
-                    sources.append("Sofascore Live")
-                elif sofa_rows:
-                    sources.append("Sofascore")
+                if sofa_day_rows:
+                    sources.append("SofaScore Day")
                 score_source = " + ".join(sources) if sources else "aucune donnée live"
                 try:
                     import logging
-                    _log = logging.getLogger("oddium")
-                    _log.info(
-                        "Live scan %s: 5Dollar=%s | livescoreFootball=%s | ESPN=%s | FotMob=%s | TheSportsDB=%s | SofascoreLive=%s | SofascoreDay=%s | total=%s",
+                    logging.getLogger("oddium").info(
+                        "Live V16 %s: Sofa=%s | ESPN=%s | SofaDay=%s | total=%s",
                         COMPETITIONS.get(key, {}).get("name", key),
-                        len(five_dollar_rows or []), len(open_rows or []), len(espn_rows or []), len(fotmob_rows or []), len(sportsdb_rows or []),
-                        len(sofa_live_rows or []), len(sofa_rows or []),
-                        len(raws or []),
+                        len(sofa_live_rows or []), len(espn_rows or []),
+                        len(sofa_day_rows or []), len(raws or []),
                     )
                 except Exception:
                     pass

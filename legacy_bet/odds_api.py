@@ -974,9 +974,16 @@ class OddsAPI:
                 time_obj = ev.get("time") or {}
                 try:
                     period_start = int(time_obj.get("currentPeriodStartTimestamp"))
-                    initial = int(time_obj.get("initial") or 0)
-                    elapsed = max(0, int(time.time()) - period_start)
-                    minute = initial + elapsed // 60
+                    # SofaScore stores `initial` as elapsed SECONDS at the start of
+                    # the current period (2700 for the second half), not minutes.
+                    # The old engine treated 2700 as 2700 minutes and rejected the
+                    # clock, which is why many LIVE rows had no timer.
+                    initial_seconds = int(time_obj.get("initial") or 0)
+                    elapsed_seconds = max(0, int(time.time()) - period_start)
+                    minute = (initial_seconds + elapsed_seconds) // 60
+                    # Football displays the first running minute as 1', not 0'.
+                    if status in {"live", "first_half", "second_half", "extra_time"} and minute == 0:
+                        minute = 1
                     if 0 <= minute <= 130:
                         live_clock = f"{minute}'"
                 except (TypeError, ValueError):
@@ -1127,9 +1134,16 @@ class OddsAPI:
                 time_obj = ev.get("time") or {}
                 try:
                     period_start = int(time_obj.get("currentPeriodStartTimestamp"))
-                    initial = int(time_obj.get("initial") or 0)
-                    elapsed = max(0, int(time.time()) - period_start)
-                    minute = initial + elapsed // 60
+                    # SofaScore stores `initial` as elapsed SECONDS at the start of
+                    # the current period (2700 for the second half), not minutes.
+                    # The old engine treated 2700 as 2700 minutes and rejected the
+                    # clock, which is why many LIVE rows had no timer.
+                    initial_seconds = int(time_obj.get("initial") or 0)
+                    elapsed_seconds = max(0, int(time.time()) - period_start)
+                    minute = (initial_seconds + elapsed_seconds) // 60
+                    # Football displays the first running minute as 1', not 0'.
+                    if status in {"live", "first_half", "second_half", "extra_time"} and minute == 0:
+                        minute = 1
                     if 0 <= minute <= 130:
                         live_clock = f"{minute}'"
                 except (TypeError, ValueError):
