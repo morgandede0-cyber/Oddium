@@ -1298,6 +1298,12 @@ class OddsAPI:
             "five_dollar_fixture_id": raw.get("five_dollar_fixture_id"),
             "provider_odds": raw.get("provider_odds"),
             "provider_stats": raw.get("provider_stats") or {},
+            "competition_name": raw.get("competition_name"),
+            "status_code": raw.get("status_code"),
+            "status_reason": raw.get("status_reason"),
+            "corners": raw.get("corners") or {},
+            "cards": raw.get("cards") or {},
+            "provider_payload": raw.get("provider_payload") or {},
         }
 
     @staticmethod

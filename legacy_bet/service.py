@@ -779,7 +779,7 @@ class BettingService:
                             """INSERT INTO matches(event_id,sport_key,competition_name,home_team,away_team,home_team_id,away_team_id,commence_time,
                                    odds_available,completed,cancelled,home_score,away_score,match_status,live_phase,live_clock,live_detail,live_source,api_football_fixture_id,five_dollar_fixture_id,last_score_update,first_seen_at,last_seen_at)
                                VALUES(?,?,?,?,?,?,?,?,0,0,0,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                            (provider_event_id, key, COMPETITIONS.get(key, {}).get("name", key), event["home_team"], event["away_team"],
+                            (provider_event_id, key, event.get("competition_name") or COMPETITIONS.get(key, {}).get("name", key), event["home_team"], event["away_team"],
                              event.get("home_team_id"), event.get("away_team_id"), event["commence_time"],
                              int(hs) if hs is not None else None, int(aws) if aws is not None else None, status, status,
                              event.get("live_clock"), event.get("status_detail"), event.get("source"), event.get("api_football_fixture_id"), event.get("five_dollar_fixture_id"),
@@ -1149,7 +1149,6 @@ class BettingService:
                   AND (
                        (live_phase IN ('live','first_half','halftime','second_half','extra_time','penalties','suspended')
                         AND (LOWER(COALESCE(live_source,'')) LIKE '%5dollar%' OR LOWER(COALESCE(live_source,'')) LIKE '%sofa%' OR LOWER(COALESCE(live_source,'')) LIKE '%espn%'))
-                       OR (live_phase='kickoff_wait' AND odds_available=1)
                        OR (live_phase IN ('finished','cancelled','postponed') AND last_score_update>=?)
                   )
                 ORDER BY completed ASC, commence_time ASC LIMIT ?""",
