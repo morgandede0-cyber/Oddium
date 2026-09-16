@@ -45,34 +45,48 @@ def _center(draw,y,text,font,fill=TEXT,width=1200):
     b=draw.textbbox((0,0),text,font=font); draw.text(((width-(b[2]-b[0]))/2,y),text,font=font,fill=fill)
 
 def match_card(match:dict,state='prematch')->BytesIO:
-    # Compact sportsbook strip: logos are the visual focus, with no large empty canvas.
-    W,H=1200,300; im=Image.new('RGB',(W,H),BG); d=ImageDraw.Draw(im)
-    d.rounded_rectangle((24,24,W-24,H-24),24,fill=PANEL,outline=GOLD,width=3)
-    d.text((52,44),'ODDIUM • MARKET',font=_font(24,True),fill=GOLD)
+    # V42: dense premium market card. Larger crests/text, structured zones, no dead space.
+    W,H=1200,390; im=Image.new('RGB',(W,H),BG); d=ImageDraw.Draw(im)
+    d.rounded_rectangle((20,20,W-20,H-20),26,fill=PANEL,outline=GOLD,width=3)
+
     competition=str(match.get('competition_name') or 'SPORTSBOOK').upper()
-    d.text((52,78),competition[:42],font=_font(16,True),fill=MUTED)
     state_label={'live':'● LIVE','won':'✓ GAGNÉ','lost':'✕ PERDU','selected':'◆ SÉLECTION','prematch':'PRÉ-MATCH'}.get(state,state.upper())
     sf=GREEN if state=='won' else RED if state=='lost' else ORANGE if state=='live' else GOLD
-    stf=_font(16,True); bb=d.textbbox((0,0),state_label,font=stf); d.text((W-52-(bb[2]-bb[0]),50),state_label,font=stf,fill=sf)
+    d.text((48,42),'ODDIUM • MARKET',font=_font(25,True),fill=GOLD)
+    d.text((48,78),competition[:42],font=_font(19,True),fill=TEXT)
+    stf=_font(18,True); bb=d.textbbox((0,0),state_label,font=stf); d.text((W-48-(bb[2]-bb[0]),48),state_label,font=stf,fill=sf)
+    d.line((48,108,W-48,108),fill=(52,53,58),width=2)
 
     home=str(match.get('home_team') or 'Domicile'); away=str(match.get('away_team') or 'Extérieur')
-    hl=_logo(home,86); al=_logo(away,86)
-    im.paste(hl,(90,120),hl); im.paste(al,(W-176,120),al)
-    namef=_font(20,True)
-    d.text((195,132),home[:24],font=namef,fill=TEXT)
-    ab=d.textbbox((0,0),away[:24],font=namef); d.text((W-195-(ab[2]-ab[0]),132),away[:24],font=namef,fill=TEXT)
+    # Large, balanced club crests.
+    logo_size=142
+    hl=_logo(home,logo_size); al=_logo(away,logo_size)
+    hx,ay=92,124; ax=W-92-logo_size
+    im.paste(hl,(hx,ay),hl); im.paste(al,(ax,ay),al)
 
-    _center(d,112,'VS',_font(22,True),GOLD,W)
+    # Team names sit close to their crest instead of floating in empty space.
+    namef=_font(28,True)
+    home_txt=home[:22]; away_txt=away[:22]
+    d.text((hx+logo_size+24,150),home_txt,font=namef,fill=TEXT)
+    ab=d.textbbox((0,0),away_txt,font=namef)
+    d.text((ax-24-(ab[2]-ab[0]),150),away_txt,font=namef,fill=TEXT)
+
+    _center(d,132,'VS',_font(25,True),GOLD,W)
     when=str(match.get('commence_time') or '').replace('T',' ')[:16]
-    _center(d,146,when,_font(14),MUTED,W)
+    _center(d,174,when,_font(18,True),MUTED,W)
 
-    odds=[('1',match.get('home_odd')),('N',match.get('draw_odd')),('2',match.get('away_odd'))]
-    xs=[414,536,658]
-    for x,(lab,val) in zip(xs,odds):
-        d.rounded_rectangle((x,185,x+104,246),12,fill=BG,outline=(62,64,70),width=2)
-        _centered_box_compact(d,(x,185,x+104,246),lab,f'{float(val):.2f}' if val else '—')
-    d.text((52,H-42),'5DOLLAR • BET365',font=_font(12,True),fill=MUTED)
-    tag='ODDIUM SPORTSBOOK'; tf=_font(12,True); tb=d.textbbox((0,0),tag,font=tf); d.text((W-52-(tb[2]-tb[0]),H-42),tag,font=tf,fill=GOLD)
+    # Clear 1/N/2 market rail: larger typography and wider boxes.
+    d.line((48,282,W-48,282),fill=(52,53,58),width=2)
+    odds=[('1 • DOMICILE',match.get('home_odd')),('N • NUL',match.get('draw_odd')),('2 • EXTÉRIEUR',match.get('away_odd'))]
+    box_w=250; gap=26; total=box_w*3+gap*2; start=(W-total)//2
+    for i,(lab,val) in enumerate(odds):
+        x=start+i*(box_w+gap)
+        d.rounded_rectangle((x,300,x+box_w,354),13,fill=BG,outline=(74,76,83),width=2)
+        value=f'{float(val):.2f}' if val else '—'
+        lf=_font(15,True); vf=_font(23,True)
+        d.text((x+18,318),lab,font=lf,fill=MUTED)
+        vb=d.textbbox((0,0),value,font=vf); d.text((x+box_w-18-(vb[2]-vb[0]),312),value,font=vf,fill=TEXT)
+
     out=BytesIO(); im.save(out,'PNG',optimize=True); out.seek(0); return out
 
 def _centered_box_compact(d,box,label,value):

@@ -422,45 +422,144 @@ class BrowseLeagueCarouselView(discord.ui.View):
 
 
 class BetModeView(discord.ui.View):
-    """Entry point. Both modes now open the same visual match-carousel pattern."""
+    """Sportsbook entry: choose the bet mode, then choose the competition in a visual carousel."""
     def __init__(self, service: BettingService, active: list[str]):
-        super().__init__(timeout=180); self.service=service; self.active=[k for k in active if k in COMPETITIONS]
+        super().__init__(timeout=180)
+        self.service = service
+        self.active = [k for k in active if k in COMPETITIONS]
 
-    async def _matches(self):
-        rows=[]
-        for key in self.active:
-            rows.extend(await self.service.matches_for_window(key, "future", 25))
-        # Stable chronological carousel; one real fixture only.
-        unique={str(m["event_id"]):m for m in rows}
-        return sorted(unique.values(), key=lambda m: str(m["commence_time"]))
+    async def _open_leagues(self, interaction: discord.Interaction, mode: str):
+        if not self.active:
+            return await interaction.response.edit_message(
+                embed=_empty_bet_carousel("PARI SIMPLE" if mode == "simple" else "PARI COMBINÉ"),
+                view=HomeReturnView(self.service), attachments=[])
+        view = BetLeagueCarouselView(self.service, self.active, mode, 0)
+        await view.render(interaction)
 
-    @discord.ui.button(label="SIMPLE",emoji="🎯",style=discord.ButtonStyle.success)
+    @discord.ui.button(label="SIMPLE", emoji="🎯", style=discord.ButtonStyle.success)
     async def simple(self, interaction: discord.Interaction, button: discord.ui.Button):
-        matches=await self._matches()
-        if not matches:return await interaction.response.edit_message(embed=_empty_bet_carousel("PARI SIMPLE"),view=HomeReturnView(self.service),attachments=[])
-        session=BetCarouselSession(self.service,self.active,matches,"simple")
-        await session.show(interaction)
+        await self._open_leagues(interaction, "simple")
 
-    @discord.ui.button(label="COMBINÉ",emoji="🧩",style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="COMBINÉ", emoji="🧩", style=discord.ButtonStyle.primary)
     async def combo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        matches=await self._matches()
-        if not matches:return await interaction.response.edit_message(embed=_empty_bet_carousel("PARI COMBINÉ"),view=HomeReturnView(self.service),attachments=[])
-        session=BetCarouselSession(self.service,self.active,matches,"combo")
+        await self._open_leagues(interaction, "combo")
+
+
+class BetLeagueNavButton(discord.ui.Button):
+    def __init__(self, direction: int):
+        self.direction = direction
+        super().__init__(emoji="◀️" if direction < 0 else "▶️", style=discord.ButtonStyle.secondary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, BetLeagueCarouselView) or not view.active:
+            return
+        view.index = (view.index + self.direction) % len(view.active)
+        view._rebuild()
+        await view.render(interaction)
+
+
+class BetLeagueOpenButton(discord.ui.Button):
+    def __init__(self, label: str):
+        super().__init__(label=label, emoji="⚽", style=discord.ButtonStyle.primary, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, BetLeagueCarouselView) or not view.active:
+            return
+        key = view.active[view.index]
+        matches = await view.service.matches_for_window(key, "future", 25)
+        unique = {str(m["event_id"]): m for m in matches}
+        matches = sorted(unique.values(), key=lambda m: str(m["commence_time"]))
+        if not matches:
+            mode_name = "PARI SIMPLE" if view.mode == "simple" else "PARI COMBINÉ"
+            embed = discord.Embed(
+                title=f"◈ ODDIUM • {mode_name}",
+                description=f"**{COMPETITIONS[key]['name']}**\n\nAucun match disponible pour le moment.",
+                color=ODDIUM_GOLD,
+            )
+            return await interaction.response.edit_message(embed=embed, view=view, attachments=carousel_attachments(view.active, view.index))
+        session = BetCarouselSession(view.service, view.active, matches, view.mode)
         await session.show(interaction)
 
+
+class BetLeagueCarouselView(discord.ui.View):
+    """Visual competition selector dedicated to betting; stays inside the user's single private page."""
+    def __init__(self, service: BettingService, active: list[str], mode: str, index: int = 0):
+        super().__init__(timeout=600)
+        self.service = service
+        self.active = [k for k in active if k in COMPETITIONS]
+        self.mode = mode
+        self.index = index % len(self.active) if self.active else 0
+        self._rebuild()
+
+    def _rebuild(self):
+        self.clear_items()
+        if not self.active:
+            return
+        info = COMPETITIONS[self.active[self.index]]
+        self.add_item(BetLeagueNavButton(-1))
+        self.add_item(BetLeagueOpenButton(f"Choisir {info['name']}"))
+        self.add_item(BetLeagueNavButton(1))
+
+    async def render(self, interaction: discord.Interaction):
+        key = self.active[self.index]
+        info = COMPETITIONS[key]
+        mode_name = "PARI SIMPLE" if self.mode == "simple" else "PARI COMBINÉ"
+        embed = discord.Embed(
+            title=f"◈ ODDIUM • {mode_name}",
+            description=(f"### CHOISIS TON CHAMPIONNAT\n"
+                         f"**{info['name']}**\n"
+                         f"Championnat **{self.index + 1}/{len(self.active)}**\n\n"
+                         "Utilise `◀` `▶` puis ouvre le championnat."),
+            color=ODDIUM_GOLD,
+        )
+        embed.set_footer(text=_footer("Sportsbook • sélection du championnat"))
+        await interaction.response.edit_message(
+            embed=embed, view=self, attachments=carousel_attachments(self.active, self.index))
 
 def _empty_bet_carousel(mode: str):
     return discord.Embed(title=f"◈ ODDIUM • {mode}",description="Aucun match disponible pour le moment.",color=ODDIUM_GOLD)
 
 
 class BetCarouselSession:
-    """One private navigation page. A carousel item is one complete fixture with both team logos."""
+    """One private betting page, grouped by local match day.
+
+    The carousel has two navigation levels:
+    - day arrows switch the selected calendar day;
+    - match arrows browse only fixtures scheduled on that day.
+    """
     def __init__(self,service,active,matches,mode):
-        self.service=service; self.active=active; self.matches=list(matches); self.mode=mode; self.index=0
+        self.service=service; self.active=active; self.all_matches=list(matches); self.mode=mode
         self.legs=[]; self.slip_message=None
+        self.matches_by_day={}
+        for match in self.all_matches:
+            day=self._day_key(match)
+            self.matches_by_day.setdefault(day,[]).append(match)
+        for day_matches in self.matches_by_day.values():
+            day_matches.sort(key=lambda x: parse_iso(x["commence_time"]))
+        self.days=sorted(self.matches_by_day)
+        self.day_index=0; self.index=0
+        self.matches=self.matches_by_day[self.days[0]] if self.days else []
+
+    @staticmethod
+    def _day_key(match):
+        return parse_iso(match["commence_time"]).astimezone(PARIS_TZ).date()
+
+    @property
+    def selected_day(self): return self.days[self.day_index]
 
     @property
     def match(self): return self.matches[self.index]
+
+    def set_day(self,direction):
+        if len(self.days)<=1:return
+        self.day_index=(self.day_index+direction)%len(self.days)
+        self.matches=self.matches_by_day[self.selected_day]
+        self.index=0
+
+    def move_match(self,direction):
+        if self.matches:self.index=(self.index+direction)%len(self.matches)
 
     def total_odd(self):
         total=1.0
@@ -469,11 +568,11 @@ class BetCarouselSession:
 
     async def render(self):
         m=self.match; mode="PARI SIMPLE" if self.mode=="simple" else "PARI COMBINÉ"
+        day_label=self.selected_day.strftime("%d/%m/%Y")
         e=discord.Embed(
             title=f"◈ ODDIUM • {mode}",
             description=(f"**{m['competition_name']}**　•　`{fmt_dt(m['commence_time'])}`\n"
-                         f"### {m['home_team']}　　VS　　{m['away_team']}\n"
-                         f"Match **{self.index+1}/{len(self.matches)}**"),
+                         f"### {m['home_team']}　　VS　　{m['away_team']}"),
             color=ODDIUM_GOLD,
         )
         e.add_field(name=f"1 • {m['home_team']}",value=f"### `{_safe_odd(m['home_odd'])}`",inline=True)
@@ -481,7 +580,7 @@ class BetCarouselSession:
         e.add_field(name=f"2 • {m['away_team']}",value=f"### `{_safe_odd(m['away_odd'])}`",inline=True)
         if self.mode=="combo":
             e.add_field(name="TICKET COMBINÉ",value=f"**{len(self.legs)} sélection(s)** • cote `{self.total_odd():.2f}`\nLe ticket détaillé s'actualise dans sa fenêtre dédiée.",inline=False)
-        e.set_footer(text=_footer("◀ ▶ change de match • les deux logos correspondent aux équipes affichées"))
+        e.set_footer(text=_footer("Date en haut • match en bas • même fenêtre privée"))
         card=discord.File(match_card(dict(m),"prematch"),filename="oddium_match.png"); e.set_image(url="attachment://oddium_match.png")
         return e,card
 
@@ -507,12 +606,32 @@ class BetCarouselSession:
         return self.slip_message
 
 
+class BetDayNav(discord.ui.Button):
+    def __init__(self,direction):
+        self.direction=direction
+        super().__init__(label="←" if direction < 0 else "→", style=discord.ButtonStyle.secondary, row=0)
+    async def callback(self,interaction):
+        s=self.view.session; s.set_day(self.direction); await s.refresh(interaction)
+
+
+class BetDateDisplay(discord.ui.Button):
+    """Read-only centre button: visually separates day navigation from match navigation."""
+    def __init__(self,session):
+        super().__init__(label=session.selected_day.strftime("%d/%m/%y"), style=discord.ButtonStyle.secondary, disabled=True, row=0)
+
+
 class BetCarouselNav(discord.ui.Button):
     def __init__(self,direction):
         self.direction=direction
-        super().__init__(emoji="◀️" if direction<0 else "▶️",style=discord.ButtonStyle.secondary,row=0)
+        super().__init__(label="←" if direction < 0 else "→", style=discord.ButtonStyle.secondary, row=2)
     async def callback(self,interaction):
-        s=self.view.session; s.index=(s.index+self.direction)%len(s.matches); await s.refresh(interaction)
+        s=self.view.session; s.move_match(self.direction); await s.refresh(interaction)
+
+
+class BetMatchDisplay(discord.ui.Button):
+    """Read-only match counter displayed between the bottom navigation arrows."""
+    def __init__(self,session):
+        super().__init__(label=f"MATCH {session.index + 1}/{len(session.matches)}", style=discord.ButtonStyle.secondary, disabled=True, row=2)
 
 
 class CarouselOutcomeButton(discord.ui.Button):
@@ -530,7 +649,6 @@ class CarouselOutcomeButton(discord.ui.Button):
         s.legs.append({"event_id":str(m["event_id"]),"selection":self.selection,"odd":self.odd,"home":m["home_team"],"away":m["away_team"]})
         await interaction.response.defer(ephemeral=True)
         await s.ensure_slip(interaction)
-        # Keep the carousel itself current too, without creating another page.
         try:
             e,card=await s.render(); await interaction.message.edit(embed=e,view=BetMatchCarouselView(s),attachments=[card])
         except (discord.NotFound,discord.HTTPException): pass
@@ -539,10 +657,18 @@ class CarouselOutcomeButton(discord.ui.Button):
 class BetMatchCarouselView(discord.ui.View):
     def __init__(self,session):
         super().__init__(timeout=600); self.session=session; m=session.match
-        self.add_item(BetCarouselNav(-1)); self.add_item(BetCarouselNav(1))
+        # Row 0: date only.  Row 1: betting outcomes.  Row 2: match only.
+        self.add_item(BetDayNav(-1))
+        self.add_item(BetDateDisplay(session))
+        self.add_item(BetDayNav(1))
+
         self.add_item(CarouselOutcomeButton(session,"HOME","1",m["home_odd"]))
         self.add_item(CarouselOutcomeButton(session,"DRAW","N",m["draw_odd"]))
         self.add_item(CarouselOutcomeButton(session,"AWAY","2",m["away_odd"]))
+
+        self.add_item(BetCarouselNav(-1))
+        self.add_item(BetMatchDisplay(session))
+        self.add_item(BetCarouselNav(1))
 
 
 def combo_text_embed(session):
