@@ -48,14 +48,15 @@ live_collector_task: asyncio.Task | None = None
 
 
 async def on_live_ws_event(payload: dict):
-    # Discord is event-driven: no fixed-interval repaint. A source change is
-    # converted by the collector to a local WebSocket event, then this handler
-    # edits the pinned live panel immediately.
+    # IMPORTANT: the collector already performs ONE canonical Discord repaint
+    # after a changed cycle. WebSocket events can be numerous for the same cycle
+    # (clock, phase, goal, card, odds...), so repainting here as well created a
+    # PATCH storm and Discord 429s. Keep this consumer for follower notifications
+    # only; the panel is refreshed once by live_collector_supervisor.
     try:
-        await panel.refresh_existing_live_panel()
         await notify_live_followers(payload)
     except Exception:
-        log.exception("Impossible d'appliquer l'événement live au panneau")
+        log.exception("Impossible d'appliquer l'événement live aux abonnés")
 
 
 async def notify_live_followers(event: dict):
