@@ -421,7 +421,7 @@ class BetModeView(discord.ui.View):
     def __init__(self,service:BettingService,active:list[str]):
         super().__init__(timeout=180); self.service=service; self.active=active
 
-    @discord.ui.button(label="Pari simple",emoji="🎯",style=discord.ButtonStyle.success)
+    @discord.ui.button(label="SIMPLE",emoji="🎯",style=discord.ButtonStyle.success)
     async def simple(self,interaction:discord.Interaction,button:discord.ui.Button):
         if not self.active:
             await interaction.response.send_message("Aucun championnat actif.",ephemeral=True); return
@@ -430,7 +430,7 @@ class BetModeView(discord.ui.View):
         embed.description="Choisis un championnat, puis un match et ton pronostic **1 / N / 2**."
         await interaction.response.edit_message(embed=embed,view=LeagueCarouselView(self.service,self.active,0),attachments=carousel_attachments(self.active, 0))
 
-    @discord.ui.button(label="Pari combiné",emoji="🧩",style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="COMBINÉ",emoji="🧩",style=discord.ButtonStyle.primary)
     async def combo(self,interaction:discord.Interaction,button:discord.ui.Button):
         session=ComboSession(self.service,self.active)
         await interaction.response.edit_message(
@@ -450,17 +450,27 @@ class ComboSession:
     async def embed(self):
         info=COMPETITIONS[self.active[self.index]] if self.active else {"emoji":"⚽","name":"Aucune ligue"}
         matches=await self.service.matches_for_window(self.active[self.index],"future",25) if self.active else []
-        desc=(f"### {info['emoji']} {info['name']}\nChoisis un championnat puis **Ajouter une sélection**.\n"
-              "Un combiné doit contenir au moins **2 matchs différents**.")
-        e=discord.Embed(title="🧩 PARI COMBINÉ",description=desc,color=discord.Color.blurple())
+        e=discord.Embed(
+            title="◈  ODDIUM • BET SLIP",
+            description=(
+                _bookmaker_header("COMBINÉ", f"{info['emoji']} **{info['name']}**　•　Ligue {self.index + 1:02d}/{len(self.active):02d}")
+                + "\n\nNavigue entre les championnats et ajoute tes sélections au ticket."
+            ),
+            color=ODDIUM_GOLD,
+        )
         if self.legs:
             lines=[]
             for i,l in enumerate(self.legs,1):
                 lab={"HOME":"1","DRAW":"N","AWAY":"2"}[l['selection']]
-                lines.append(f"**{i}.** {l['home']} — {l['away']} • **{lab} @ {l['odd']:.2f}**")
-            e.add_field(name=f"🎟️ Ticket • {len(self.legs)} sélection(s)",value="\n".join(lines),inline=False)
-            e.add_field(name="📈 Cote combinée",value=f"**{self.total_odd():.2f}**",inline=True)
-        e.set_footer(text=f"{len(matches)} match(s) dans ce championnat • maximum 10 sélections")
+                pick={"HOME":l['home'],"DRAW":"Match nul","AWAY":l['away']}[l['selection']]
+                lines.append(f"`{i:02d}` **{l['home']} — {l['away']}**\n　└ {lab} • **{pick}**　`@ {l['odd']:.2f}`")
+            e.add_field(name=f"🎟️ BET SLIP　•　{len(self.legs)}/10",value="\n\n".join(lines)[:1024],inline=False)
+            e.add_field(name="COTE TOTALE",value=f"### `{self.total_odd():.2f}`",inline=True)
+            e.add_field(name="STATUT",value="### PRÊT" if len(self.legs)>=2 else "### +1 SÉLECTION",inline=True)
+        else:
+            e.add_field(name="🎟️ BET SLIP", value="*Ticket vide*\nAjoute au minimum **2 sélections**.", inline=False)
+        e.add_field(name="MARCHÉ DISPONIBLE",value=f"**{len(matches)} match(s)**　•　`1` `N` `2`",inline=False)
+        e.set_footer(text=_footer("Bet Slip • maximum 10 sélections"))
         if self.active:
             sport_key = self.active[self.index]
             if sport_key in CAROUSEL_ASSETS:
@@ -637,6 +647,25 @@ def _safe_odd(value) -> str:
         return f"{float(value):.2f}"
     except (TypeError, ValueError):
         return "—"
+
+
+def _bookmaker_header(section: str, subtitle: str = "") -> str:
+    line = f"### ◈ {section.upper()} ◈\n{ODDIUM_DIVIDER}"
+    return line + (f"\n{subtitle}" if subtitle else "")
+
+def _market_triplet(match) -> str:
+    return (
+        f"` 1  {_safe_odd(match['home_odd'])} `　"
+        f"` N  {_safe_odd(match['draw_odd'])} `　"
+        f"` 2  {_safe_odd(match['away_odd'])} `"
+    )
+
+def _selection_name(selection: str, match) -> str:
+    return {
+        "HOME": str(match["home_team"]),
+        "DRAW": "Match nul",
+        "AWAY": str(match["away_team"]),
+    }.get(selection, selection)
 
 
 def _phase_badge(row) -> tuple[str, int]:
@@ -948,8 +977,18 @@ class MainPanelView(discord.ui.View):
     @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
         active = carousel_keys(await self.service.active_competitions())
-        e = discord.Embed(title="🎟️  ODDIUM • BET DESK", description=f"### CRÉER UN TICKET\n{ODDIUM_DIVIDER}\n🎯 **SIMPLE**　Un match, un pronostic\n🧩 **COMBINÉ**　Plusieurs sélections, une cote totale", color=ODDIUM_GOLD)
-        e.set_footer(text=_footer("Choisis ton mode de pari"))
+        e = discord.Embed(
+            title="◈  ODDIUM • SPORTSBOOK",
+            description=(
+                _bookmaker_header("BET DESK", "Compose ton ticket comme sur un vrai bookmaker.")
+                + "\n\n`SIMPLE`  1 sélection • cote fixe à validation"
+                + "\n`COMBINÉ` plusieurs sélections • cote cumulée"
+                + "\n\n**Marché principal**　`1` Domicile　`N` Nul　`2` Extérieur"
+            ),
+            color=ODDIUM_GOLD,
+        )
+        e.add_field(name="◆ SOURCE DES COTES", value="**Bet365 via 5Dollar**\nContrôle de la cote au moment de la validation.", inline=False)
+        e.set_footer(text=_footer("Sportsbook • choisis SIMPLE ou COMBINÉ"))
         await interaction.response.send_message(embed=e, view=BetModeView(self.service, active), ephemeral=True)
 
     @discord.ui.button(label="Mes paris", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
@@ -1017,7 +1056,7 @@ class StakeModal(discord.ui.Modal, title="🎟️ Confirmer la mise"):
         balance = await self.service.economy.get_balance(interaction.user.id)
         label = {"HOME": match["home_team"], "DRAW": "Match nul", "AWAY": match["away_team"]}[self.selection]
         e = discord.Embed(
-            title="✅ TICKET VALIDÉ",
+            title="◆  ODDIUM • TICKET ACCEPTÉ",
             description=f"**BET-{data['bet_id']}**  •  {match['competition_name']}",
             color=ODDIUM_GREEN,
         )
@@ -1061,9 +1100,9 @@ class ChangedOddView(discord.ui.View):
 class BetChoiceButton(discord.ui.Button):
     def __init__(self, service: BettingService, event_id: str, selection: str, label: str, odd: float, row: int = 0):
         style = {
-            "HOME": discord.ButtonStyle.success,
-            "DRAW": discord.ButtonStyle.primary,
-            "AWAY": discord.ButtonStyle.success,
+            "HOME": discord.ButtonStyle.primary,
+            "DRAW": discord.ButtonStyle.secondary,
+            "AWAY": discord.ButtonStyle.primary,
         }.get(selection, discord.ButtonStyle.secondary)
         super().__init__(label=f"{label}   {odd:.2f}"[:80], style=style, row=row)
         self.service = service; self.event_id = event_id; self.selection = selection; self.odd = odd
@@ -1108,14 +1147,18 @@ class MatchSelect(discord.ui.Select):
         total_inv = sum(inv) or 1.0
         probs = [round(100.0 * x / total_inv) for x in inv]
         e = discord.Embed(
-            title=f"{match['home_team']}  —  {match['away_team']}",
-            description=f"**{match['competition_name']}**\n🕒 {fmt_dt(match['commence_time'])}",
+            title="◈  ODDIUM • MARKET",
+            description=(
+                _bookmaker_header(str(match['competition_name']), f"`{fmt_dt(match['commence_time'])}`")
+                + f"\n\n### {match['home_team']}\n## VS\n### {match['away_team']}"
+            ),
             color=ODDIUM_GOLD,
         )
-        e.add_field(name=f"1  {match['home_team']}", value=f"### `{_safe_odd(match['home_odd'])}` {trend['home']}\n📊 {probs[0]}%", inline=True)
-        e.add_field(name="N  Match nul", value=f"### `{_safe_odd(match['draw_odd'])}` {trend['draw']}\n📊 {probs[1]}%", inline=True)
-        e.add_field(name=f"2  {match['away_team']}", value=f"### `{_safe_odd(match['away_odd'])}` {trend['away']}\n📊 {probs[2]}%", inline=True)
-        e.set_footer(text="Choisis 1 / N / 2 ci-dessous • la cote est vérifiée au moment de valider")
+        e.add_field(name=f"1 • {match['home_team']}", value=f"### `{_safe_odd(match['home_odd'])}`　{trend['home']}\nMarché normalisé　**{probs[0]}%**", inline=True)
+        e.add_field(name="N • MATCH NUL", value=f"### `{_safe_odd(match['draw_odd'])}`　{trend['draw']}\nMarché normalisé　**{probs[1]}%**", inline=True)
+        e.add_field(name=f"2 • {match['away_team']}", value=f"### `{_safe_odd(match['away_odd'])}`　{trend['away']}\nMarché normalisé　**{probs[2]}%**", inline=True)
+        e.add_field(name="◆ MARKET PULSE", value="Les flèches indiquent le mouvement récent de la cote. Les pourcentages sont dérivés des cotes normalisées, pas un pronostic Oddium.", inline=False)
+        e.set_footer(text=_footer("Market • clique 1 / N / 2 • cote revérifiée avant débit"))
         await interaction.response.send_message(embed=e, view=MatchBetView(self.service, match), ephemeral=True)
 
 # --- Match Center -----------------------------------------------------------
@@ -1284,73 +1327,65 @@ class MatchCenterView(discord.ui.View):
 
 async def build_carousel_embed(service: BettingService, active: list[str], index: int) -> discord.Embed:
     if not active:
-        return discord.Embed(title="🎟️ ODDIUM • BET DESK", description="Aucun championnat actif actuellement.", color=ODDIUM_GOLD)
+        return discord.Embed(title="◈ ODDIUM • SPORTSBOOK", description=_bookmaker_header("BET DESK", "Aucun championnat actif actuellement."), color=ODDIUM_GOLD)
     index %= len(active)
     sport_key = active[index]
     info = COMPETITIONS[sport_key]
     matches = await service.matches_for_window(sport_key, "future", 25)
     e = discord.Embed(
-        title=f"{info['emoji']}  ODDIUM • {info['name'].upper()}",
+        title="◈  ODDIUM • SPORTSBOOK",
         description=(
-            f"### BET DESK　`{index + 1:02d}/{len(active):02d}`\n"
-            f"{ODDIUM_DIVIDER}\n"
-            "`◀` **LIGUE PRÉCÉDENTE**　　　 **LIGUE SUIVANTE** `▶`"
+            _bookmaker_header("LEAGUE LOBBY", f"{info['emoji']}  **{info['name'].upper()}**")
+            + f"\n\n`{index + 1:02d} / {len(active):02d}`　◀  NAVIGATION CHAMPIONNATS  ▶"
         ),
         color=ODDIUM_GOLD,
     )
     if matches:
         nxt = matches[0]
         local = parse_iso(nxt["commence_time"]).astimezone(PARIS_TZ)
-        e.add_field(name="MATCHS OUVERTS", value=f"### ⚽ {len(matches):02d}", inline=True)
-        e.add_field(name="PROCHAIN COUP D'ENVOI", value=f"### {local.strftime('%H:%M')}\n{local.strftime('%d/%m')}", inline=True)
-        e.add_field(name="MARCHÉ PRINCIPAL", value="### `1`　`N`　`2`", inline=True)
-        preview = []
-        for m in matches[:3]:
-            dt = parse_iso(m["commence_time"]).astimezone(PARIS_TZ)
+        e.add_field(name="◆ MATCHS OUVERTS", value=f"### {len(matches):02d}", inline=True)
+        e.add_field(name="◆ PROCHAIN KICK-OFF", value=f"### {local.strftime('%H:%M')}\n`{local.strftime('%d/%m/%Y')}`", inline=True)
+        e.add_field(name="◆ MARCHÉ", value="### `1 • N • 2`", inline=True)
+        preview=[]
+        for i,m in enumerate(matches[:3],1):
+            dt=parse_iso(m["commence_time"]).astimezone(PARIS_TZ)
             preview.append(
-                f"`{dt.strftime('%d/%m • %H:%M')}`  **{m['home_team']} — {m['away_team']}**\n"
-                f"　`1 {_safe_odd(m['home_odd'])}`　`N {_safe_odd(m['draw_odd'])}`　`2 {_safe_odd(m['away_odd'])}`"
+                f"`{i:02d}`　**{m['home_team']}**  vs  **{m['away_team']}**\n"
+                f"　　`{dt.strftime('%d/%m • %H:%M')}`　{_market_triplet(m)}"
             )
-        e.add_field(name="✦ À L'AFFICHE", value="\n\n".join(preview), inline=False)
+        e.add_field(name="✦ FEATURED MARKETS", value="\n\n".join(preview)[:1024], inline=False)
+        e.add_field(name="COMMENT PARIER", value="**Ouvrir le championnat** → choisir un match → sélectionner `1`, `N` ou `2` → saisir la mise.", inline=False)
     else:
-        e.add_field(name="CALENDRIER", value="📭 Aucun pari ouvert dans ce championnat pour le moment.", inline=False)
-    filename = CAROUSEL_ASSETS.get(sport_key)
-    if filename:
-        e.set_image(url=f"attachment://{filename}")
-    e.set_footer(text=_footer("Bet365 via 5Dollar • navigation carrousel"))
+        e.add_field(name="◆ MARCHÉ FERMÉ", value="Aucun pari pré-match ouvert dans cette compétition.", inline=False)
+    filename=CAROUSEL_ASSETS.get(sport_key)
+    if filename: e.set_image(url=f"attachment://{filename}")
+    e.set_footer(text=_footer("Sportsbook • Bet365 via 5Dollar • cotes contrôlées à validation"))
     return e
 
 
 async def build_league_embed(service: BettingService, sport_key: str, matches) -> discord.Embed:
-    info = COMPETITIONS[sport_key]
-    e = discord.Embed(
-        title=f"{info['emoji']}  ODDIUM • {info['name'].upper()}",
-        description=f"### MATCH BOARD\nSélectionne une rencontre pour ouvrir le marché **1 / N / 2**.\n{ODDIUM_DIVIDER}",
+    info=COMPETITIONS[sport_key]
+    e=discord.Embed(
+        title="◈  ODDIUM • MATCH BOARD",
+        description=_bookmaker_header(info['name'], "Choisis une affiche pour ouvrir sa fiche bookmaker."),
         color=ODDIUM_GOLD,
     )
-    filename = CAROUSEL_ASSETS.get(sport_key)
-    if filename:
-        e.set_image(url=f"attachment://{filename}")
     if not matches:
-        e.add_field(name="📭 AUCUN MATCH OUVERT", value="Reviens au carrousel pour choisir une autre compétition.", inline=False)
-        e.set_footer(text=_footer("Calendrier 5Dollar"))
-        return e
-    grouped: dict[str, list] = defaultdict(list)
+        e.add_field(name="◆ AUCUN MARCHÉ OUVERT", value="Reviens au League Lobby pour choisir une autre compétition.", inline=False)
+        e.set_footer(text=_footer("Match Board • calendrier 5Dollar")); return e
+    grouped=defaultdict(list)
     for m in matches[:25]:
-        local = parse_iso(m["commence_time"]).astimezone(PARIS_TZ)
-        grouped[local.strftime("%Y-%m-%d")].append((local, m))
+        local=parse_iso(m['commence_time']).astimezone(PARIS_TZ); grouped[local.strftime('%Y-%m-%d')].append((local,m))
+    shown=0
     for _, day_matches in list(grouped.items())[:4]:
-        local_day = day_matches[0][0]
-        rows = []
-        for local, m in day_matches[:5]:
-            rows.append(
-                f"`{local.strftime('%H:%M')}`　**{m['home_team']}  vs  {m['away_team']}**\n"
-                f"　└ `1  {_safe_odd(m['home_odd'])}`　`N  {_safe_odd(m['draw_odd'])}`　`2  {_safe_odd(m['away_odd'])}`"
-            )
-        e.add_field(name=f"📅  {local_day.strftime('%A %d/%m').upper()}", value="\n\n".join(rows)[:1024], inline=False)
-    e.set_footer(text=_footer(f"{len(matches)} match(s) ouverts • Bet365 via 5Dollar"))
+        day=day_matches[0][0]; rows=[]
+        for local,m in day_matches[:5]:
+            shown+=1
+            rows.append(f"`{shown:02d}` `{local.strftime('%H:%M')}`　**{m['home_team']}  —  {m['away_team']}**\n　　{_market_triplet(m)}")
+        e.add_field(name=f"◆ {day.strftime('%d/%m/%Y')}", value="\n\n".join(rows)[:1024], inline=False)
+    e.add_field(name="LÉGENDE", value="`1` Domicile　•　`N` Match nul　•　`2` Extérieur", inline=False)
+    e.set_footer(text=_footer(f"Match Board • {len(matches)} marché(s) ouverts"))
     return e
-
 
 async def _live_embed(service):
     rows = await service.live_matches(25)

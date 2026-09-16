@@ -6,7 +6,7 @@ PANEL = (ROOT / "legacy_bet" / "discord_ui" / "panel.py").read_text(encoding="ut
 
 
 def test_oddium_visual_identity_is_present():
-    for marker in ("ODDIUM • BET DESK", "ODDIUM • LIVE ARENA", "MATCH CENTER", "HALL OF FAME"):
+    for marker in ("ODDIUM • SPORTSBOOK", "ODDIUM • LIVE ARENA", "MATCH CENTER", "HALL OF FAME"):
         assert marker in UI
 
 
