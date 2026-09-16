@@ -17,6 +17,37 @@ INDEX_FILE = LOGO_DIR / "index.json"
 MANIFEST_URL = "https://raw.githubusercontent.com/frertommy/team-logos/main/manifest.json"
 ALLOWED_GROUPS = {"Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Champions League", "Europa League"}
 
+# Aliases commonly returned by football providers. Values point to the canonical
+# slug used by the logo manifest. Keep ambiguous short city names out of this map.
+PROVIDER_ALIASES = {
+    # France
+    "psg": "paris-saint-germain", "paris-sg": "paris-saint-germain",
+    "paris-saint-germain-fc": "paris-saint-germain", "paris-saint-germain-football-club": "paris-saint-germain",
+    "om": "marseille", "ol": "lyon", "rc-lens": "lens", "racing-club-de-lens": "lens",
+    "stade-rennais-fc": "rennes", "stade-rennais": "rennes", "stade-brest-29": "stade-brestois-29",
+    "stade-brestois": "stade-brestois-29", "losc": "lille", "losc-lille": "lille",
+    "ogc-nice": "nice", "as-monaco": "monaco", "fc-nantes": "nantes",
+    "rc-strasbourg": "strasbourg", "rc-strasbourg-alsace": "strasbourg",
+    # England
+    "man-utd": "manchester-united", "manchester-utd": "manchester-united", "man-united": "manchester-united",
+    "man-city": "manchester-city", "spurs": "tottenham-hotspur", "tottenham": "tottenham-hotspur",
+    "wolves": "wolverhampton-wanderers", "wolverhampton": "wolverhampton-wanderers",
+    "newcastle": "newcastle-united", "west-ham": "west-ham-united",
+    # Spain
+    "barca": "barcelona", "fc-barcelona": "barcelona", "real-madrid-cf": "real-madrid",
+    "atletico": "atletico-madrid", "atletico-de-madrid": "atletico-madrid",
+    "athletic-bilbao": "athletic-club", "athletic-club-bilbao": "athletic-club",
+    "real-betis-balompie": "real-betis", "deportivo-alaves": "alaves",
+    # Germany
+    "bayern-munich": "bayern-munchen", "fc-bayern-munich": "bayern-munchen", "fc-bayern-munchen": "bayern-munchen",
+    "dortmund": "borussia-dortmund", "bvb": "borussia-dortmund", "leverkusen": "bayer-leverkusen",
+    "rb-leipzig": "rb-leipzig", "hoffenheim": "1899-hoffenheim", "tsg-hoffenheim": "1899-hoffenheim",
+    # Italy
+    "inter": "inter-milan", "internazionale": "inter-milan", "internazionale-milano": "inter-milan",
+    "ac-milan": "ac-milan", "milan": "ac-milan", "juve": "juventus",
+    "as-roma": "roma", "ssc-napoli": "napoli",
+}
+
 
 def normalize_name(value: str) -> str:
     value = unicodedata.normalize("NFKD", str(value or "")).encode("ascii", "ignore").decode("ascii").lower()
@@ -72,6 +103,16 @@ async def sync_team_logos(*, force: bool = False) -> dict[str, int]:
                 log.warning("Logo indisponible pour %s: %s", name, exc)
 
         await asyncio.gather(*(one(t) for t in teams))
+
+    # Provider aliases are added only when their canonical target really exists in
+    # the downloaded manifest/cache. This prevents an alias from pointing to a
+    # phantom file after a competition/club change.
+    canonical_files = {normalize_name(Path(v).stem): v for v in aliases.values()}
+    for alias, canonical in PROVIDER_ALIASES.items():
+        target = canonical_files.get(normalize_name(canonical))
+        if target:
+            aliases[normalize_name(alias)] = target
+
     INDEX_FILE.write_text(json.dumps({"source": MANIFEST_URL, "aliases": aliases}, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info("Team Identity: %s téléchargés, %s déjà présents, %s échecs", downloaded, skipped, failed)
     return {"downloaded": downloaded, "skipped": skipped, "failed": failed, "aliases": len(aliases)}

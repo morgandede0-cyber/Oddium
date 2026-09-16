@@ -9,3 +9,13 @@ def test_visual_fallback_and_index():
 def test_no_panel_creation_from_logo_sync():
     s=(ROOT/'legacy_bet/discord_ui/team_logos.py').read_text(encoding='utf-8').lower()
     assert 'ensure_panel' not in s and 'channel.send' not in s
+
+
+def test_provider_aliases_cover_psg_and_common_names():
+    s=(ROOT/'legacy_bet/discord_ui/team_logos.py').read_text(encoding='utf-8')
+    for alias in ('psg', 'paris-sg', 'man-utd', 'bayern-munich', 'athletic-bilbao', 'internazionale'):
+        assert f'"{alias}"' in s
+
+def test_visual_resolver_uses_provider_aliases():
+    s=(ROOT/'legacy_bet/discord_ui/visuals.py').read_text(encoding='utf-8')
+    assert '_logo_mapping' in s and 'PROVIDER_ALIASES' in s

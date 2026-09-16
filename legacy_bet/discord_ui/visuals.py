@@ -27,8 +27,31 @@ def _logo_index():
     except Exception:
         return {}
 
+def _logo_mapping(team: str, idx: dict[str, str]) -> str | None:
+    key = _slug(team)
+    if key in idx:
+        return idx[key]
+    # Same conservative provider aliases as the synchronizer, imported lazily to
+    # keep image rendering usable even if network dependencies are unavailable.
+    try:
+        from .team_logos import PROVIDER_ALIASES, normalize_name
+        canonical = PROVIDER_ALIASES.get(key)
+        if canonical:
+            direct = idx.get(normalize_name(canonical))
+            if direct:
+                return direct
+            # Older index files may not contain the explicit alias yet, but the
+            # canonical cached filename can still be used safely.
+            for ext in ('png','webp','jpg','jpeg'):
+                p = LOGO_DIR / f'{canonical}.{ext}'
+                if p.exists():
+                    return p.name
+    except Exception:
+        pass
+    return None
+
 def _logo(team:str,size=132):
-    idx=_logo_index(); mapped=idx.get(_slug(team))
+    idx=_logo_index(); mapped=_logo_mapping(team, idx)
     candidates=[LOGO_DIR/mapped] if mapped else []
     candidates += [LOGO_DIR/f'{_slug(team)}.{ext}' for ext in ('png','webp','jpg','jpeg')]
     for p in candidates:
