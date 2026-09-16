@@ -1146,12 +1146,17 @@ class MainPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         active = carousel_keys(await self.service.active_competitions())
         if not active:
-            return await interaction.response.send_message("Aucun championnat actif.", ephemeral=True)
+            return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
         await open_private_page(interaction, embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0), replace_existing=True)
 
     @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
+        # Acknowledge the permanent-panel click before DB/provider work.
+        # Without this, a cold request can make Discord show a dead button.
+        await interaction.response.defer(ephemeral=True, thinking=False)
         active = carousel_keys(await self.service.active_competitions())
+        if not active:
+            return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
         e = discord.Embed(
             title="◈  ODDIUM • SPORTSBOOK",
             description=(

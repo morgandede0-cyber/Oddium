@@ -27,7 +27,7 @@ CAROUSEL_ASSETS = {
     "soccer_germany_bundesliga": "carousel_bundesliga.png",
     "soccer_italy_serie_a": "carousel_seriea.png",
     "soccer_uefa_champs_league": "carousel_champions.png",
-    "soccer_uefa_europa_league": "carousel_league-europa.png",
+    "soccer_uefa_europa_league": "carousel_europa.png",
 }
 
 
@@ -591,19 +591,28 @@ class BetCarouselSession:
             lines += ["", f"**TICKET COMBINÉ** • {len(self.legs)} sélection(s) • cote `{self.total_odd():.2f}`"]
         return "\n".join(lines)
 
+    def build_page(self):
+        # Components V2 galleries reference message attachments by attachment:// URL.
+        # Keep the File alive and pass it with the edit; putting discord.File directly
+        # inside MediaGallery does not upload it and leaves the interaction unchanged.
+        image = discord.File(match_card(dict(self.match), "prematch"), filename="oddium_match.png")
+        return BetMatchCarouselLayout(self), image
+
     def build_layout(self):
+        # Compatibility helper for callers that only need the component tree.
         return BetMatchCarouselLayout(self)
 
     async def show(self,interaction):
-        # Components V2 let Oddium put the date controls above the content.
-        layout = self.build_layout()
+        # Components V2: DATE TOP -> content -> market -> MATCH BOTTOM.
+        layout, image = self.build_page()
         if interaction.response.is_done():
-            await interaction.edit_original_response(content=None, embed=None, attachments=[], view=layout)
+            await interaction.edit_original_response(content=None, embed=None, attachments=[image], view=layout)
         else:
-            await interaction.response.edit_message(content=None, embed=None, attachments=[], view=layout)
+            await interaction.response.edit_message(content=None, embed=None, attachments=[image], view=layout)
 
     async def refresh(self,interaction):
-        await interaction.response.edit_message(content=None, embed=None, attachments=[], view=self.build_layout())
+        layout, image = self.build_page()
+        await interaction.response.edit_message(content=None, embed=None, attachments=[image], view=layout)
 
 
     async def ensure_slip(self,interaction):
@@ -664,7 +673,8 @@ class CarouselOutcomeButton(discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         await s.ensure_slip(interaction)
         try:
-            await interaction.message.edit(content=None, embed=None, attachments=[], view=s.build_layout())
+            layout, image = s.build_page()
+            await interaction.message.edit(content=None, embed=None, attachments=[image], view=layout)
         except (discord.NotFound,discord.HTTPException):
             pass
 
@@ -682,10 +692,10 @@ class BetMatchCarouselLayout(discord.ui.LayoutView):
         # 2) Match information.
         self.add_item(discord.ui.TextDisplay(session.match_text()))
 
-        # 3) Dynamic logo VS logo graphic.
-        card=discord.File(match_card(dict(m),"prematch"), filename="oddium_match.png")
+        # 3) Dynamic logo VS logo graphic. The actual file is attached by
+        # BetCarouselSession.build_page(); MediaGallery only references it.
         gallery=discord.ui.MediaGallery()
-        gallery.add_item(media=card, description=f"{m['home_team']} VS {m['away_team']}")
+        gallery.add_item(media="attachment://oddium_match.png", description=f"{m['home_team']} VS {m['away_team']}")
         self.add_item(gallery)
 
         # 4) 1 / N / 2 choices.
@@ -1146,12 +1156,17 @@ class MainPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         active = carousel_keys(await self.service.active_competitions())
         if not active:
-            return await interaction.response.send_message("Aucun championnat actif.", ephemeral=True)
+            return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
         await open_private_page(interaction, embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0), replace_existing=True)
 
     @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
+        # Acknowledge the permanent-panel click before DB/provider work.
+        # Without this, a cold request can make Discord show a dead button.
+        await interaction.response.defer(ephemeral=True, thinking=False)
         active = carousel_keys(await self.service.active_competitions())
+        if not active:
+            return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
         e = discord.Embed(
             title="◈  ODDIUM • SPORTSBOOK",
             description=(
@@ -1538,8 +1553,9 @@ async def build_carousel_embed(service: BettingService, active: list[str], index
         e.add_field(name="COMMENT PARIER", value="**Ouvrir le championnat** → choisir un match → sélectionner `1`, `N` ou `2` → saisir la mise.", inline=False)
     else:
         e.add_field(name="◆ MARCHÉ FERMÉ", value="Aucun pari pré-match ouvert dans cette compétition.", inline=False)
-    filename=CAROUSEL_ASSETS.get(sport_key)
-    if filename: e.set_image(url=f"attachment://{filename}")
+    filename = CAROUSEL_ASSETS.get(sport_key)
+    if filename and (ASSET_DIR / filename).is_file():
+        e.set_image(url=f"attachment://{filename}")
     e.set_footer(text=_footer("Sportsbook • Bet365 via 5Dollar • cotes contrôlées à validation"))
     return e
 
