@@ -41,7 +41,7 @@ class FiveDollarClient:
         # may use the legacy id family, so `_ensure_league_ids()` resolves the user's
         # own ids from /leagues and replaces these values in memory.
         "soccer_epl": FiveDollarLeague((3120672213,), "Premier League", "GB-ENG", ("EPL",)),
-        "soccer_spain_la_liga": FiveDollarLeague((1810150156,), "La Liga", "ES", ("Primera Division",)),
+        "soccer_spain_la_liga": FiveDollarLeague((1810150156, 14), "La Liga", "ES", ("Primera Division", "Spain La Liga", "LaLiga", "LaLiga EA Sports")),
         "soccer_france_ligue_one": FiveDollarLeague((3614399544,), "Ligue 1", "FR", ("Ligue One",)),
         "soccer_germany_bundesliga": FiveDollarLeague((686337048,), "Bundesliga", "DE", ("1. Bundesliga",)),
         "soccer_italy_serie_a": FiveDollarLeague((3405541143,), "Serie A", "IT", ("Serie A Enilive",)),
@@ -239,7 +239,14 @@ class FiveDollarClient:
                         exact = candidate in names or short in names
                         champions = sport_key == "soccer_uefa_champs_league" and "champions league" in candidate
                         europa = sport_key == "soccer_uefa_europa_league" and "europa league" in candidate and "conference" not in candidate
-                        if exact or champions or europa:
+                        # 5Dollar public-v1 currently exposes La Liga as "Spain La Liga"
+                        # (league id 14), while older account catalogues can expose
+                        # "La Liga" with a legacy id. Accept both identities, but only
+                        # inside country ES so another competition cannot leak in.
+                        laliga = sport_key == "soccer_spain_la_liga" and (
+                            "la liga" in candidate or candidate.startswith("laliga") or "primera division" in candidate
+                        )
+                        if exact or champions or europa or laliga:
                             try:
                                 ids.append(int(row["id"]))
                             except (KeyError, TypeError, ValueError):
@@ -503,6 +510,9 @@ class FiveDollarClient:
         canonical = self._name_key(wanted.name)
         if canonical and (lname.startswith(canonical + " ") or lname.startswith(canonical + "-")):
             return True
+        if sport_key == "soccer_spain_la_liga":
+            # Native live rows may say "Spain La Liga" or sponsored "LaLiga EA Sports".
+            return "la liga" in lname or lname.startswith("laliga") or "primera division" in lname
         if sport_key == "soccer_uefa_champs_league":
             return "champions league" in lname
         if sport_key == "soccer_uefa_europa_league":
