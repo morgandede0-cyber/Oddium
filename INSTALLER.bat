@@ -12,5 +12,5 @@ if %errorlevel%==0 (
 if not exist .env copy .env.example .env >nul
 echo.
 echo Installation terminee.
-echo Ouvre maintenant le fichier .env et renseigne DISCORD_TOKEN et FOOTBALL_DATA_API_KEY.
+echo Ouvre maintenant le fichier .env et renseigne DISCORD_TOKEN et FIVE_DOLLAR_FOOTBALL_API_KEY.
 pause

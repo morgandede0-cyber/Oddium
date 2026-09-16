@@ -14,6 +14,16 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -23,81 +33,53 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
+    # Discord / application
     discord_token: str = os.getenv("DISCORD_TOKEN", "")
-    propline_api_key: str = os.getenv("PROPLINE_API_KEY", "")
-    # football-data.org: source gratuite pour calendriers / scores / classements.
-    football_data_api_key: str = os.getenv("FOOTBALL_DATA_API_KEY", "")
-    # V12: source principale unique = 5DollarFootballAPI Pro.
-    # La clé reste uniquement dans Coolify/.env, jamais dans le dépôt Git.
-    five_dollar_api_key: str = os.getenv("FIVE_DOLLAR_FOOTBALL_API_KEY", os.getenv("FOOTBALL_API_KEY", ""))
+    guild_id: int | None = _optional_int("GUILD_ID")
+
+    # 5DollarFootballAPI — unique football authority
+    five_dollar_api_key: str = os.getenv("FIVE_DOLLAR_FOOTBALL_API_KEY", "")
     five_dollar_poll_seconds: int = min(120, max(15, _int("FIVE_DOLLAR_POLL_SECONDS", 45)))
     five_dollar_fixtures_cache_seconds: int = max(120, _int("FIVE_DOLLAR_FIXTURES_CACHE_SECONDS", 900))
-    # Anciens champs V11 conservés seulement pour compatibilité de configuration.
-    api_football_key: str = os.getenv("API_FOOTBALL_KEY", "")
-    rapidapi_key: str = os.getenv("RAPIDAPI_KEY", "")
-    api_football_poll_seconds: int = min(90, max(30, _int("API_FOOTBALL_POLL_SECONDS", 45)))
-    # Ancien alias conserve pour compatibilite avec le reste du bot.
-    odds_api_key: str = os.getenv("PROPLINE_API_KEY", "")
-    guild_id: int | None = int(os.getenv("GUILD_ID")) if os.getenv("GUILD_ID") else None
+    api_cache_dir: str = os.getenv("API_CACHE_DIR", "data/api_cache")
 
+    # Persistence / maintenance
     db_path: str = os.getenv("DB_PATH", "data/oddium.db")
     backup_dir: str = os.getenv("BACKUP_DIR", "data/backups")
     log_dir: str = os.getenv("LOG_DIR", "logs")
+    backup_every_hours: int = _int("BACKUP_EVERY_HOURS", 6)
+    backup_keep_count: int = _int("BACKUP_KEEP_COUNT", 20)
 
-    propline_bookmakers: str = os.getenv("PROPLINE_BOOKMAKERS", "pinnacle,bovada,draftkings,fanduel,betmgm,unibet")
-    odds_bookmakers: str = "Bet365 • 5DollarFootballAPI Pro • secours Oddium Fusion"
-    oddium_odds_margin_percent: int = _int("ODDIUM_ODDS_MARGIN_PERCENT", 6)
-    use_propline_odds: bool = _bool("USE_PROPLINE_ODDS", False)
+    # Economy / bets
     currency_name: str = os.getenv("CURRENCY_NAME", "Gold")
     starting_balance: int = _int("STARTING_BALANCE", 5000)
-
     min_stake: int = _int("MIN_STAKE", 10)
     max_stake: int = _int("MAX_STAKE", 5000)
     max_stake_balance_percent: int = _int("MAX_STAKE_BALANCE_PERCENT", 100)
     allow_multiple_bets_same_event: bool = _bool("ALLOW_MULTIPLE_BETS_SAME_EVENT", True)
-
     lock_seconds_before_kickoff: int = _int("LOCK_SECONDS_BEFORE_KICKOFF", 60)
+
+    # Runtime / Discord refresh
     panel_refresh_seconds: int = _int("PANEL_REFRESH_SECONDS", 60)
     engine_tick_seconds: int = _int("ENGINE_TICK_SECONDS", 60)
-    # V8.6: collector near-live. The Discord panel itself is event-driven via our
-    # local WebSocket and is NOT repainted on this timer.
     live_poll_seconds: int = min(15, max(3, _int("LIVE_POLL_SECONDS", 5)))
     live_discovery_seconds: int = min(30, max(10, _int("LIVE_DISCOVERY_SECONDS", 15)))
-    scores_refresh_seconds: int = live_poll_seconds  # compatibility with older code
     live_ws_host: str = os.getenv("LIVE_WS_HOST", "127.0.0.1")
     live_ws_port: int = _int("LIVE_WS_PORT", 8765)
     live_ws_path: str = os.getenv("LIVE_WS_PATH", "/live")
+    live_panel_lookback_minutes: int = _int("LIVE_PANEL_LOOKBACK_MINUTES", 210)
+    live_panel_lookahead_minutes: int = _int("LIVE_PANEL_LOOKAHEAD_MINUTES", 20)
 
-    events_refresh_seconds: int = _int("EVENTS_REFRESH_SECONDS", 21600)  # 6h
+    # Scheduled refreshes
+    events_refresh_seconds: int = _int("EVENTS_REFRESH_SECONDS", 21600)
     odds_refresh_far_seconds: int = _int("ODDS_REFRESH_FAR_SECONDS", 3600)
     odds_refresh_near_seconds: int = _int("ODDS_REFRESH_NEAR_SECONDS", 1800)
     odds_refresh_hot_seconds: int = _int("ODDS_REFRESH_HOT_SECONDS", 900)
     odds_horizon_hours: int = _int("ODDS_HORIZON_HOURS", 168)
 
-    user_button_cooldown_seconds: int = _int("USER_BUTTON_COOLDOWN_SECONDS", 0)
-    backup_every_hours: int = _int("BACKUP_EVERY_HOURS", 6)
-    backup_keep_count: int = _int("BACKUP_KEEP_COUNT", 20)
-
+    # Notifications
     dm_notifications_default: bool = _bool("DM_NOTIFICATIONS_DEFAULT", True)
     notify_before_minutes: int = _int("NOTIFY_BEFORE_MINUTES", 30)
-
-    market_model_enabled: bool = _bool("MARKET_MODEL_ENABLED", True)
-    market_model_history_years: int = _int("MARKET_MODEL_HISTORY_YEARS", 6)
-
-    # Cache/rate settings inherited from older sources. Discord never calls providers directly.
-    api_min_interval_seconds: int = _int("API_MIN_INTERVAL_SECONDS", 1)
-    api_max_retries: int = _int("API_MAX_RETRIES", 2)
-    api_cache_dir: str = os.getenv("API_CACHE_DIR", "data/api_cache")
-    fixtures_cache_seconds: int = _int("FIXTURES_CACHE_SECONDS", 21600)   # 6h
-    scores_cache_seconds: int = min(45, max(10, _int("SCORES_CACHE_SECONDS", 45)))   # cache < polling live
-    live_panel_lookback_minutes: int = _int("LIVE_PANEL_LOOKBACK_MINUTES", 210)
-    live_panel_lookahead_minutes: int = _int("LIVE_PANEL_LOOKAHEAD_MINUTES", 20)
-    live_finished_display_minutes: int = _int("LIVE_FINISHED_DISPLAY_MINUTES", 5)
-    standings_cache_seconds: int = _int("STANDINGS_CACHE_SECONDS", 21600)
-    odds_cache_far_seconds: int = _int("ODDS_CACHE_FAR_SECONDS", 21600)   # >24h: 6h
-    odds_cache_day_seconds: int = _int("ODDS_CACHE_DAY_SECONDS", 7200)    # 6-24h: 2h
-    odds_cache_near_seconds: int = _int("ODDS_CACHE_NEAR_SECONDS", 1800)  # 1-6h: 30m
-    odds_cache_hot_seconds: int = _int("ODDS_CACHE_HOT_SECONDS", 900)     # <1h: 15m
 
 
 SETTINGS = Settings()

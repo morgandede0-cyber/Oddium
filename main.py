@@ -10,14 +10,14 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import SETTINGS
-from legacy_bet.database import Database
-from legacy_bet.economy import EconomyAdapter
-from legacy_bet.odds_api import OddsAPI
-from legacy_bet.panel import PanelManager
-from legacy_bet.service import BettingService
-from legacy_bet.ui import AdminPanelView, MainPanelView, LivePanelView, LIVE_EVENT_LABELS, fmt_num
-from legacy_bet.live_ws import LocalLiveWebSocket, consume_local_live
-from legacy_bet.live_identity import event_fingerprint
+from legacy_bet.data.database import Database
+from legacy_bet.betting.economy import EconomyAdapter
+from legacy_bet.providers.gateway import OddsAPI
+from legacy_bet.discord_ui.panel import PanelManager
+from legacy_bet.betting.service import BettingService
+from legacy_bet.discord_ui.ui import AdminPanelView, MainPanelView, LivePanelView, LIVE_EVENT_LABELS, fmt_num
+from legacy_bet.live.websocket import LocalLiveWebSocket, consume_local_live
+from legacy_bet.live.identity import event_fingerprint
 
 os.makedirs(SETTINGS.log_dir, exist_ok=True)
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -77,7 +77,7 @@ async def notify_live_followers(event: dict):
     reference = f"{event_id}:{fp}"
     for row in followers:
         uid=int(row["user_id"])
-        # V15: a retry/reconnect/redeploy must never send the same live alert twice.
+        # A retry/reconnect/redeploy must never send the same live alert twice.
         # notification_log is UNIQUE(user, kind, reference), so this remains safe
         # across process restarts as well.
         if not await service.mark_notification_sent(uid, "LIVE_FOLLOW", reference):
@@ -119,7 +119,7 @@ async def setup_hook():
     await live_ws.start()
     global live_ws_consumer_task, live_collector_task
     live_ws_consumer_task = asyncio.create_task(consume_local_live(on_live_ws_event), name="oddium-live-ws-consumer")
-    # V9.1: collecteur autonome démarré immédiatement. Il ne dépend ni de on_ready,
+    # Collecteur autonome démarré immédiatement. Il ne dépend ni de on_ready,
     # ni d'un panneau Discord, ni de discord.ext.tasks.
     live_collector_task = asyncio.create_task(live_collector_supervisor(), name="oddium-live-supervisor")
     active = await service.active_competitions()
@@ -195,8 +195,8 @@ async def diagnostic_oddium(interaction: discord.Interaction):
     live_count = int(await db.get_setting("live_engine_visible_count") or 0)
     last_scan = await db.get_setting("live_engine_last_scan")
     embed = discord.Embed(
-        title="🩺 Diagnostic Oddium V15",
-        description="5Dollar Engine • fixtures + Bet365 + live/events/stats • ESPN/Sofascore/FotMob/TheSportsDB en secours",
+        title="🩺 Diagnostic Oddium",
+        description="Moteur football 100 % natif 5DollarFootballAPI • aucune fusion de fournisseur",
         color=discord.Color.green() if not status.get("last_error") else discord.Color.orange(),
     )
     embed.add_field(name="Live", value=f"Matchs visibles : **{live_count}**\nDernier scan : `{last_scan or '—'}`", inline=False)
@@ -215,10 +215,58 @@ async def diagnostic_oddium(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+FIVE_DOLLAR_ACTIONS = [
+    app_commands.Choice(name="Live complet", value="live"),
+    app_commands.Choice(name="Fixtures du jour", value="fixtures"),
+    app_commands.Choice(name="Fixture complète", value="fixture"),
+    app_commands.Choice(name="Cotes Bet365", value="odds"),
+    app_commands.Choice(name="Bookmakers", value="bookmakers"),
+    app_commands.Choice(name="Historique des cotes", value="odds_history"),
+    app_commands.Choice(name="Événements", value="events"),
+    app_commands.Choice(name="Statistiques", value="statistics"),
+    app_commands.Choice(name="Classement", value="standings"),
+    app_commands.Choice(name="Pays", value="countries"),
+    app_commands.Choice(name="Ligues + saisons", value="leagues"),
+    app_commands.Choice(name="Détail ligue", value="league"),
+    app_commands.Choice(name="Matchs ligue", value="league_fixtures"),
+    app_commands.Choice(name="Équipe", value="team"),
+    app_commands.Choice(name="Matchs équipe", value="team_fixtures"),
+    app_commands.Choice(name="Compte / quota", value="status"),
+    app_commands.Choice(name="Moteur 5Dollar Ultimate", value="engine"),
+]
+
+@bot.tree.command(name="5dollar", description="Explore directement toutes les fonctions natives 5Dollar")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(action=FIVE_DOLLAR_ACTIONS)
+async def five_dollar_explorer(interaction: discord.Interaction, action: app_commands.Choice[str], id: int | None = None, saison: str | None = None, marche: str = "1x2"):
+    needs_id = {"fixture","odds","odds_history","events","statistics","standings","league","league_fixtures","team","team_fixtures"}
+    if action.value in needs_id and id is None:
+        await interaction.response.send_message("❌ Cette fonction demande un `id` 5Dollar (fixture, ligue ou équipe selon l'action).", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        data = await odds_api.five_dollar_call(action.value, object_id=id, league_id=id, season=saison, market=marche)
+        import json
+        raw = json.dumps(data, ensure_ascii=False, indent=2, default=str)
+        if len(raw) <= 3800:
+            await interaction.followup.send(f"**5Dollar • {action.name}**\n```json\n{raw}\n```", ephemeral=True)
+        else:
+            from io import BytesIO
+            await interaction.followup.send(
+                content=f"**5Dollar • {action.name}** — réponse complète ({len(raw)} caractères)",
+                file=discord.File(BytesIO(raw.encode("utf-8")), filename=f"5dollar_{action.value}.json"),
+                ephemeral=True,
+            )
+    except Exception as exc:
+        await interaction.followup.send(f"❌ 5Dollar : `{type(exc).__name__}: {exc}`", ephemeral=True)
+
+
+
 @setup.error
 @setup_live.error
 @admin_paris.error
 @diagnostic_oddium.error
+@five_dollar_explorer.error
 async def admin_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         msg = "❌ Réservé aux administrateurs."
@@ -266,7 +314,7 @@ async def live_collector_supervisor():
     can no longer stop the collector. Public-source caches in OddsAPI bound network use.
     """
     await bot.wait_until_ready()
-    log.info("Oddium V15 Best-of Engine • 5Dollar Pro • Match Center • Live robuste")
+    log.info("Oddium • 5Dollar Pro • Match Center • Live robuste")
     previous_signature = None
     failures = 0
     while not bot.is_closed():
