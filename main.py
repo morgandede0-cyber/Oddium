@@ -18,6 +18,7 @@ from legacy_bet.betting.service import BettingService
 from legacy_bet.discord_ui.ui import AdminPanelView, MainPanelView, LivePanelView, LIVE_EVENT_LABELS, fmt_num
 from legacy_bet.live.websocket import LocalLiveWebSocket, consume_local_live
 from legacy_bet.live.identity import event_fingerprint
+from legacy_bet.discord_ui.team_logos import sync_team_logos
 
 os.makedirs(SETTINGS.log_dir, exist_ok=True)
 formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -114,6 +115,8 @@ async def setup_hook():
     await db.init()
     await odds_api.start()
     await live_ws.start()
+    # V35: les logos sont mis en cache en arrière-plan; cela ne crée aucun panneau Discord.
+    asyncio.create_task(sync_team_logos(), name="oddium-team-logo-sync")
     global live_ws_consumer_task, live_collector_task
     live_ws_consumer_task = asyncio.create_task(consume_local_live(on_live_ws_event), name="oddium-live-ws-consumer")
     # Collecteur autonome démarré immédiatement. Il ne dépend ni de on_ready,

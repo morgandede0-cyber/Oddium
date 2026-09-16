@@ -2,6 +2,8 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 import re
+import json
+import unicodedata
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,11 +17,21 @@ def _font(size:int,bold:bool=False):
     return ImageFont.load_default()
 
 def _slug(s:str)->str:
-    return re.sub(r'[^a-z0-9]+','-',s.lower()).strip('-')
+    raw=unicodedata.normalize('NFKD',str(s or '')).encode('ascii','ignore').decode('ascii').lower().replace('&',' and ')
+    raw=re.sub(r'\b(fc|afc|cf|ac|sc|as|ssc|calcio|football club|club de futbol)\b',' ',raw)
+    return re.sub(r'[^a-z0-9]+','-',raw).strip('-')
+
+def _logo_index():
+    try:
+        return json.loads((LOGO_DIR/'index.json').read_text(encoding='utf-8')).get('aliases',{})
+    except Exception:
+        return {}
 
 def _logo(team:str,size=132):
-    for ext in ('png','webp','jpg','jpeg'):
-        p=LOGO_DIR/f'{_slug(team)}.{ext}'
+    idx=_logo_index(); mapped=idx.get(_slug(team))
+    candidates=[LOGO_DIR/mapped] if mapped else []
+    candidates += [LOGO_DIR/f'{_slug(team)}.{ext}' for ext in ('png','webp','jpg','jpeg')]
+    for p in candidates:
         if p.exists():
             try:
                 im=Image.open(p).convert('RGBA'); im.thumbnail((size,size),Image.Resampling.LANCZOS); return im
