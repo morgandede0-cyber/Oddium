@@ -470,6 +470,36 @@ class FiveDollarClient:
             "provider_payload": item,
         }
 
+    def _belongs_to_supported_league(self, row: dict[str, Any], sport_key: str) -> bool:
+        """Fail closed: a fixture must match BOTH the resolved 5Dollar league id
+        and the expected competition name. This prevents an incorrect/stale id from
+        leaking Swiss Super League (or any other competition) into Oddium.
+        """
+        wanted = self.LEAGUES.get(sport_key)
+        if wanted is None:
+            return False
+        try:
+            lid = int(row.get("five_dollar_league_id"))
+        except (TypeError, ValueError):
+            return False
+        ids = set(self._league_ids.get(sport_key) or wanted.ids)
+        if lid not in ids:
+            return False
+        lname = self._name_key(row.get("competition_name"))
+        if not lname:
+            return False
+        names = {self._name_key(wanted.name), *(self._name_key(x) for x in wanted.aliases)}
+        if lname in names:
+            return True
+        # Sponsored display names are accepted only when they extend the exact
+        # canonical league name (e.g. "Ligue 1 McDonald's", "LaLiga EA Sports").
+        canonical = self._name_key(wanted.name)
+        if canonical and (lname.startswith(canonical + " ") or lname.startswith(canonical + "-")):
+            return True
+        if sport_key == "soccer_uefa_champs_league":
+            return "champions league" in lname
+        return False
+
     async def live_board_shells(self, *, force: bool = False) -> list[dict[str, Any]]:
         """Return the native 5Dollar global live board for Oddium competitions.
 
@@ -500,13 +530,9 @@ class FiveDollarClient:
         await self._ensure_league_ids()
         out = []
         for row in all_rows:
-            lid = row.get("five_dollar_league_id")
-            lname = self._name_key(row.get("competition_name"))
             sport_key = None
-            for key, wanted in self.LEAGUES.items():
-                ids = set(self._league_ids.get(key) or wanted.ids)
-                names = {self._name_key(wanted.name), *(self._name_key(x) for x in wanted.aliases)}
-                if lid in ids or lname in names or (key == "soccer_uefa_champs_league" and "champions league" in lname):
+            for key in self.LEAGUES:
+                if self._belongs_to_supported_league(row, key):
                     sport_key = key
                     break
             if not sport_key:
@@ -542,15 +568,7 @@ class FiveDollarClient:
                 self._live_cache = (time.monotonic(), rows)
                 all_rows = rows
         await self._ensure_league_ids()
-        ids = set(self._league_ids.get(sport_key) or self.LEAGUES[sport_key].ids)
-        wanted = self.LEAGUES[sport_key]
-        wanted_names = {self._name_key(wanted.name), *(self._name_key(x) for x in wanted.aliases)}
-        return [
-            r for r in all_rows
-            if r.get("five_dollar_league_id") in ids
-            or self._name_key(r.get("competition_name")) in wanted_names
-            or (sport_key == "soccer_uefa_champs_league" and "champions league" in self._name_key(r.get("competition_name")))
-        ]
+        return [r for r in all_rows if self._belongs_to_supported_league(r, sport_key)]
 
     async def fixture_shells(self, sport_key: str, *, force: bool = False, days: int = 30) -> list[dict[str, Any]]:
         if not self.enabled or sport_key not in self.LEAGUES:
@@ -584,7 +602,7 @@ class FiveDollarClient:
                     break
                 for item in payload.get("data") or []:
                     shell = self._fixture_to_shell(item)
-                    if shell:
+                    if shell and self._belongs_to_supported_league(shell, sport_key):
                         rows.append(shell)
                 pagination = payload.get("pagination") or {}
                 if not pagination.get("has_more"):
@@ -619,7 +637,7 @@ class FiveDollarClient:
                     break
                 for item in payload.get("data") or []:
                     shell = self._fixture_to_shell(item)
-                    if shell:
+                    if shell and self._belongs_to_supported_league(shell, sport_key):
                         rows.append(shell)
                 pagination = payload.get("pagination") or {}
                 if not pagination.get("has_more"):

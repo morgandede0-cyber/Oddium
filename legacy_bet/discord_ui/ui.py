@@ -987,7 +987,7 @@ class MainPanelView(discord.ui.View):
         active = carousel_keys(await self.service.active_competitions())
         if not active:
             return await interaction.response.send_message("Aucun championnat actif.", ephemeral=True)
-        await open_private_page(interaction, embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0))
+        await open_private_page(interaction, embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0), replace_existing=True)
 
     @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
@@ -1004,20 +1004,20 @@ class MainPanelView(discord.ui.View):
         )
         e.add_field(name="◆ SOURCE DES COTES", value="**Bet365 via 5Dollar**\nContrôle de la cote au moment de la validation.", inline=False)
         e.set_footer(text=_footer("Sportsbook • choisis SIMPLE ou COMBINÉ"))
-        await open_private_page(interaction, embed=e, view=BetModeView(self.service, active))
+        await open_private_page(interaction, embed=e, view=BetModeView(self.service, active), replace_existing=True)
 
     @discord.ui.button(label="Mes paris", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
     async def mybets(self, interaction, button):
-        await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service))
+        await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service), replace_existing=True)
 
     @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
     async def live(self, interaction, button):
-        await open_private_page(interaction, embed=await _live_embed(self.service), view=LivePanelView(self.service))
+        await open_private_page(interaction, embed=await _live_embed(self.service), view=LivePanelView(self.service), replace_existing=True)
 
     @discord.ui.button(label="Classement", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
     async def rank(self, interaction, button):
         e = await _leaderboard_embed(self.service, interaction.client)
-        await open_private_page(interaction, embed=e, view=RankProfileView(self.service))
+        await open_private_page(interaction, embed=e, view=RankProfileView(self.service), replace_existing=True)
 
 # --- Premium betting flow ---------------------------------------------------
 

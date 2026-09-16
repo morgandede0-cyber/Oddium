@@ -37,7 +37,8 @@ async def _ack(interaction: discord.Interaction) -> None:
 async def show(interaction: discord.Interaction, *, content: str | None = None,
                embed: discord.Embed | None = None, view: discord.ui.View | None = None,
                files: list[discord.File] | None = None,
-               attachments: list[Any] | None = None) -> discord.WebhookMessage:
+               attachments: list[Any] | None = None,
+               replace_existing: bool = False) -> discord.WebhookMessage:
     """Open/replace the user's single navigation page.
 
     Panel buttons always acknowledge first. If an existing ephemeral page is still
@@ -48,6 +49,23 @@ async def show(interaction: discord.Interaction, *, content: str | None = None,
     async with _lock(key):
         await _ack(interaction)
         page = _pages.get(key)
+
+        # A dismissed ephemeral message still exists server-side and Discord gives
+        # bots no event telling us that the user closed it. Entry buttons on the
+        # permanent panel therefore deliberately replace the previous ephemeral:
+        # delete it when possible, forget its handle, then send a fresh response.
+        # This guarantees that clicking the panel can always reopen Oddium while
+        # keeping at most one navigation page per user.
+        if replace_existing and page is not None:
+            try:
+                await page.message.delete()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+            except Exception as exc:
+                log.debug("Oddium private page cleanup for %s: %r", key, exc)
+            _pages.pop(key, None)
+            page = None
+
         edit_attachments = attachments if attachments is not None else (files or [])
         if page is not None:
             try:

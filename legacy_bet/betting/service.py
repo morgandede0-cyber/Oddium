@@ -1241,6 +1241,22 @@ class BettingService:
         await self.db.log_admin(admin_id, "VOID_EVENT", f"{event_id} • {count} paris • {note}")
         return count
 
+    @staticmethod
+    def _competition_name_allowed(sport_key: str, competition_name: str | None) -> bool:
+        """Second safety gate for rows already stored before the provider filter fix."""
+        import unicodedata
+        raw = unicodedata.normalize("NFKD", str(competition_name or "")).encode("ascii", "ignore").decode("ascii").lower()
+        raw = " ".join(raw.replace("-", " ").split())
+        expected = {
+            "soccer_france_ligue_one": ("ligue 1",),
+            "soccer_epl": ("premier league",),
+            "soccer_spain_la_liga": ("la liga", "laliga"),
+            "soccer_germany_bundesliga": ("bundesliga",),
+            "soccer_italy_serie_a": ("serie a",),
+            "soccer_uefa_champs_league": ("champions league", "ligue des champions"),
+        }.get(sport_key, ())
+        return bool(raw and any(token in raw for token in expected))
+
     async def matches_for_window(self, sport_key: str, window: str, limit: int = 25):
         now_local = datetime.now(PARIS_TZ)
         if window == "today":
@@ -1258,6 +1274,7 @@ class BettingService:
                ORDER BY commence_time ASC LIMIT ?""",
             (sport_key, start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat(), max(limit * 3, 75)),
         )
+        rows = [r for r in rows if self._competition_name_allowed(sport_key, r["competition_name"])]
         return self._dedupe_match_rows(rows, limit)
 
     async def current_and_future_matches(self, limit: int = 12):
@@ -1267,11 +1284,12 @@ class BettingService:
         placeholders = ",".join("?" for _ in active)
         start = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
         end = (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat()
-        return await self.db.fetchall(
+        rows = await self.db.fetchall(
             f"""SELECT * FROM matches WHERE sport_key IN ({placeholders}) AND commence_time BETWEEN ? AND ?
                 AND cancelled=0 ORDER BY commence_time ASC LIMIT ?""",
-            tuple(active) + (start, end, limit),
+            tuple(active) + (start, end, max(limit * 3, 36)),
         )
+        return [r for r in rows if self._competition_name_allowed(r["sport_key"], r["competition_name"])][:limit]
 
     async def odds_trend(self, event_id: str) -> dict[str, str]:
         rows = await self.db.fetchall(
