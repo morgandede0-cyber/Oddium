@@ -105,11 +105,8 @@ async def sync_commands():
 @bot.event
 async def on_ready():
     log.info("Connecté en tant que %s (%s)", bot.user, bot.user.id if bot.user else "?")
-    try:
-        await panel.refresh_existing_panel()
-        await panel.refresh_existing_live_panel()
-    except Exception:
-        log.exception("Impossible de restaurer le panneau au démarrage")
+    # Panels are installed manually by the administrator with /setup and
+    # /setup_live. A reconnect/redeploy must never create or reinstall them.
 
 
 @bot.event

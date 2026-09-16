@@ -68,12 +68,32 @@ class PanelManager:
         return msg
 
     async def refresh_existing_panel(self):
+        """Refresh the manually installed main panel without ever creating one.
+
+        Only /setup is allowed to create/install the panel.  Automatic loops and
+        reconnects may edit the exact stored message, but if it was deleted they
+        leave the channel untouched instead of silently recreating duplicates.
+        """
         channel_id = await self.service.db.get_setting("panel_channel_id")
-        if not channel_id:
+        message_id = await self.service.db.get_setting("panel_message_id")
+        if not channel_id or not message_id:
             return
         channel = self.bot.get_channel(int(channel_id))
-        if isinstance(channel, discord.TextChannel):
-            await self.ensure_panel(channel)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        try:
+            msg = await channel.fetch_message(int(message_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+            return
+        active = await self.service.active_competitions()
+        embed = await build_title_embed(self.service)
+        view = MainPanelView(self.service, active)
+        image_path = ASSET_DIR / "oddium_welcome.png"
+        present = [a.filename for a in msg.attachments]
+        if image_path.exists() and present != ["oddium_welcome.png"]:
+            await msg.edit(embed=embed, view=view, attachments=[discord.File(image_path, filename="oddium_welcome.png")])
+        else:
+            await msg.edit(embed=embed, view=view)
 
 
     @staticmethod
@@ -193,9 +213,23 @@ class PanelManager:
             return msg
 
     async def refresh_existing_live_panel(self):
+        """Refresh the manually installed live panel without ever creating one.
+
+        Only /setup_live may create/install it.  If the stored Discord message no
+        longer exists, automatic live events simply do nothing until the admin
+        runs /setup_live again.
+        """
         channel_id = await self.service.db.get_setting("live_panel_channel_id")
-        if not channel_id:
+        message_id = await self.service.db.get_setting("live_panel_message_id")
+        if not channel_id or not message_id:
             return
         channel = self.bot.get_channel(int(channel_id))
-        if isinstance(channel, discord.TextChannel):
-            await self.ensure_live_panel(channel)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        try:
+            msg = await channel.fetch_message(int(message_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+            return
+        embed = await self.build_live_embed()
+        view = LivePanelView(self.service)
+        await msg.edit(embed=embed, view=view)
