@@ -405,6 +405,54 @@ class FiveDollarClient:
             "provider_payload": item,
         }
 
+    async def live_board_shells(self, *, force: bool = False) -> list[dict[str, Any]]:
+        """Return the native 5Dollar global live board for Oddium competitions.
+
+        This is intentionally the source of truth for the permanent Live panel.
+        Oddium does not reconstruct live membership from SQLite/kickoff times.
+        """
+        if not self.enabled:
+            return []
+        now = time.monotonic()
+        ttl = max(15, int(SETTINGS.five_dollar_poll_seconds))
+        fetched_at, all_rows = self._live_cache
+        if fetched_at <= 0 or force or now - fetched_at >= ttl:
+            payload = await self._get(
+                "/fixtures",
+                {"status": "live", "include": "odds,events,stats", "per_page": 500, "lang": "fr"},
+            )
+            if payload is None:
+                return list(all_rows) if fetched_at > 0 else []
+            rows = []
+            for item in payload.get("data") or []:
+                shell = self._fixture_to_shell(item)
+                if shell:
+                    rows.append(shell)
+            self._live_cache = (time.monotonic(), rows)
+            all_rows = rows
+
+        await self._ensure_league_ids()
+        out = []
+        for row in all_rows:
+            lid = row.get("five_dollar_league_id")
+            lname = self._name_key(row.get("competition_name"))
+            sport_key = None
+            for key, wanted in self.LEAGUES.items():
+                ids = set(self._league_ids.get(key) or wanted.ids)
+                names = {self._name_key(wanted.name), *(self._name_key(x) for x in wanted.aliases)}
+                if lid in ids or lname in names or (key == "soccer_uefa_champs_league" and "champions league" in lname):
+                    sport_key = key
+                    break
+            if not sport_key:
+                continue
+            item = dict(row)
+            item["sport_key"] = sport_key
+            item["event_id"] = item.get("id")
+            item["match_status"] = item.get("status")
+            item["live_phase"] = item.get("status")
+            out.append(item)
+        return out
+
     async def live_shells(self, sport_key: str, *, force: bool = False) -> list[dict[str, Any]]:
         if not self.enabled or sport_key not in self.LEAGUES:
             return []

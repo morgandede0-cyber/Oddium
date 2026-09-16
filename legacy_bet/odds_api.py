@@ -182,6 +182,9 @@ class OddsAPI:
     async def fetch_five_dollar_live(self, sport_key: str, *, force: bool = False):
         return await self.five_dollar.live_shells(sport_key, force=force)
 
+    async def fetch_five_dollar_live_board(self, *, force: bool = False):
+        return await self.five_dollar.live_board_shells(force=force)
+
     async def fetch_five_dollar_fixtures(self, sport_key: str, *, force: bool = False):
         return await self.five_dollar.fixture_shells(sport_key, force=force)
 

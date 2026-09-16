@@ -1135,24 +1135,36 @@ class BettingService:
         return None
 
     async def live_matches(self, limit: int = 25):
-        """Rows displayed by the permanent live-score panel, de-duplicated across providers."""
+        """Permanent Live board = native 5Dollar status=live response.
+
+        SQLite is no longer allowed to decide which match is live.  This prevents
+        stale scheduled/kickoff_wait rows from overriding 5Dollar status_code.
+        """
+        if SETTINGS.five_dollar_api_key:
+            try:
+                rows = await self.odds_api.fetch_five_dollar_live_board(force=False)
+                # 5Dollar already guarantees status=live; preserve its fixture id,
+                # competition, score, minute/half and expanded payload as-is.
+                rows = [r for r in rows if str(r.get("status") or "").lower() in {"live","first_half","second_half","halftime","extra_time","penalties"}]
+                rows.sort(key=lambda r: (str(r.get("sport_key") or ""), str(r.get("commence_time") or ""), str(r.get("home_team") or "")))
+                return rows[:max(1, limit)]
+            except Exception:
+                # Only a transport/API failure may fall back to the last known DB
+                # state. An empty successful 5Dollar live list means no live games.
+                pass
+
         now = datetime.now(timezone.utc)
         start = (now - timedelta(minutes=SETTINGS.live_panel_lookback_minutes)).isoformat()
         end = (now + timedelta(minutes=SETTINGS.live_panel_lookahead_minutes)).isoformat()
         live_keys = list(COMPETITIONS.keys())
         placeholders = ",".join("?" for _ in live_keys)
-        recent_terminal = (now - timedelta(minutes=SETTINGS.live_finished_display_minutes)).isoformat()
         rows = await self.db.fetchall(
-            f"""SELECT * FROM matches
-                WHERE sport_key IN ({placeholders})
-                  AND commence_time BETWEEN ? AND ?
-                  AND (
-                       (live_phase IN ('live','first_half','halftime','second_half','extra_time','penalties','suspended')
-                        AND (LOWER(COALESCE(live_source,'')) LIKE '%5dollar%' OR LOWER(COALESCE(live_source,'')) LIKE '%sofa%' OR LOWER(COALESCE(live_source,'')) LIKE '%espn%'))
-                       OR (live_phase IN ('finished','cancelled','postponed') AND last_score_update>=?)
-                  )
-                ORDER BY completed ASC, commence_time ASC LIMIT ?""",
-            tuple(live_keys) + (start, end, recent_terminal, max(limit * 4, 100)),
+            f"""SELECT * FROM matches WHERE sport_key IN ({placeholders})
+                AND commence_time BETWEEN ? AND ?
+                AND live_phase IN ('live','first_half','halftime','second_half','extra_time','penalties')
+                AND LOWER(COALESCE(live_source,'')) LIKE '%5dollar%'
+                ORDER BY commence_time ASC LIMIT ?""",
+            tuple(live_keys) + (start, end, max(limit * 2, 50)),
         )
         return self._dedupe_match_rows(rows, limit)
 
