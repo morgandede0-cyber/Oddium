@@ -15,10 +15,9 @@ log = logging.getLogger("oddium.livews")
 class LocalLiveWebSocket:
     """Local event bus exposed as a real WebSocket.
 
-    The football sources are still HTTP because free providers do not expose a
-    reliable permanent push feed.  The collector converts score/status changes
-    into push events.  Discord therefore reacts to events instead of refreshing
-    the panel on a fixed timer.
+    5DollarFootballAPI is polled over HTTP. The collector converts real
+    score/status changes into local push events so Discord can react without
+    rebuilding the panel blindly on every timer tick.
     """
 
     def __init__(self):
@@ -62,7 +61,7 @@ class LocalLiveWebSocket:
         await ws.prepare(request)
         self._clients.add(ws)
         try:
-            await ws.send_json({"type": "hello", "source": "Oddium Live", "version": "8.8"})
+            await ws.send_json({"type": "hello", "source": "Oddium Live", "version": "29"})
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT and msg.data == "ping":
                     await ws.send_str("pong")

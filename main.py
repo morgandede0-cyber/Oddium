@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from config import SETTINGS
-from legacy_bet.data.database import Database
+from legacy_bet.storage.database import Database
 from legacy_bet.betting.economy import EconomyAdapter
 from legacy_bet.providers.gateway import OddsAPI
 from legacy_bet.discord_ui.panel import PanelManager

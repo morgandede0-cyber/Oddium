@@ -1,6 +1,6 @@
 import asyncio
 from config import SETTINGS
-from legacy_bet.data.database import Database
+from legacy_bet.storage.database import Database
 from legacy_bet.providers.gateway import OddsAPI
 
 SPORTS = [

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from config import SETTINGS
-from ..data.database import Database, utcnow_iso
+from ..storage.database import Database, utcnow_iso
 
 
 class EconomyAdapter:

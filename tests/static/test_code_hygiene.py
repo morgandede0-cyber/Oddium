@@ -73,3 +73,32 @@ def test_runtime_has_no_retired_provider_identifiers():
 def test_png_assets_have_real_png_signature():
     for path in (ROOT / "assets").glob("*.png"):
         assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", f"{path.name} porte une extension .png mais son contenu n'est pas PNG"
+
+
+def test_runtime_package_layout_is_deployable():
+    root = Path(__file__).resolve().parents[2]
+    required = [
+        root / "legacy_bet" / "__init__.py",
+        root / "legacy_bet" / "storage" / "__init__.py",
+        root / "legacy_bet" / "storage" / "database.py",
+        root / "legacy_bet" / "betting" / "service.py",
+        root / "legacy_bet" / "providers" / "gateway.py",
+        root / "legacy_bet" / "discord_ui" / "ui.py",
+        root / "legacy_bet" / "live" / "websocket.py",
+    ]
+    missing = [str(p.relative_to(root)) for p in required if not p.is_file()]
+    assert not missing, f"Runtime files missing: {missing}"
+
+
+def test_coolify_default_compose_filename_exists():
+    root = Path(__file__).resolve().parents[2]
+    assert (root / "docker-compose.yaml").is_file()
+
+
+def test_old_data_package_import_is_gone():
+    root = Path(__file__).resolve().parents[2]
+    offenders = []
+    for p in [root / "main.py", *list((root / "legacy_bet").rglob("*.py")), *list((root / "scripts").rglob("*.py"))]:
+        if p.is_file() and "legacy_bet.data" in p.read_text(encoding="utf-8"):
+            offenders.append(str(p.relative_to(root)))
+    assert not offenders, f"Stale legacy_bet.data imports: {offenders}"

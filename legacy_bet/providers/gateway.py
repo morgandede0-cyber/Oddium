@@ -5,7 +5,7 @@ import aiohttp
 
 from config import SETTINGS
 from ..core.constants import COMPETITIONS
-from ..data.database import Database
+from ..storage.database import Database
 from .five_dollar import FiveDollarClient
 
 

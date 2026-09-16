@@ -1,7 +1,7 @@
 # Oddium architecture — current
 
 - `legacy_bet/core/` : constants and shared utilities.
-- `legacy_bet/data/` : SQLite persistence and compatibility migrations.
+- `legacy_bet/storage/` : SQLite persistence and compatibility migrations.
 - `legacy_bet/providers/` : 5Dollar API, Guardian, intelligence and provider gateway.
 - `legacy_bet/live/` : live identity/fingerprints and local WebSocket transport.
 - `legacy_bet/betting/` : economy and betting business service.
