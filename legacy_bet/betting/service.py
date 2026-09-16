@@ -1223,6 +1223,7 @@ class BettingService:
                 notifications.append({
                     "user_id": int(combo["user_id"]), "combo_id": combo_id, "status": final_status,
                     "payout": payout, "stake": int(combo["stake"]), "odd": float(combo["total_odd"]),
+                    "combo_count": len(combo_legs),
                 })
         return notifications
 
@@ -1387,6 +1388,12 @@ class BettingService:
             await self.db.execute("DELETE FROM bets WHERE id=? AND status='CREATING'", (bet_id,))
             return False, "Solde insuffisant.", None
         await self.db.execute("UPDATE bets SET status='PENDING' WHERE id=? AND status='CREATING'", (bet_id,))
+        await self.economy.bridge.emit({
+            "type": "bet_placed", "user_id": int(user_id), "reference": f"BET-{bet_id}",
+            "stake": int(stake), "odd": float(current_odd),
+            "home_team": str(match["home_team"]), "away_team": str(match["away_team"]),
+            "selection": str(selection),
+        })
         return True, "OK", {"bet_id": bet_id, "odd": current_odd, "payout": payout, "match": match}
 
     async def place_combo_bet(self, user_id: int, legs: list[dict], stake: int):
@@ -1440,6 +1447,10 @@ class BettingService:
                 (combo_id, event_id, selection, odd),
             )
         await self.db.execute("UPDATE combo_bets SET status='PENDING' WHERE id=? AND status='CREATING'", (combo_id,))
+        await self.economy.bridge.emit({
+            "type": "bet_placed", "user_id": int(user_id), "reference": f"COMBO-{combo_id}",
+            "stake": int(stake), "odd": float(total_odd), "combo_count": len(checked),
+        })
         return True, "OK", {"combo_id": combo_id, "total_odd": total_odd, "payout": payout, "legs": checked}
 
     async def user_combo_bets(self, user_id: int, limit: int = 10):

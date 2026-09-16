@@ -50,6 +50,10 @@ class Settings:
     backup_every_hours: int = _int("BACKUP_EVERY_HOURS", 6)
     backup_keep_count: int = _int("BACKUP_KEEP_COUNT", 20)
 
+    # Altherya bridge — authoritative Gold wallet
+    altherya_bridge_url: str = os.getenv("ALTHERYA_BRIDGE_URL", "").strip()
+    altherya_bridge_token: str = os.getenv("ALTHERYA_BRIDGE_TOKEN", "").strip()
+
     # Economy / bets
     currency_name: str = os.getenv("CURRENCY_NAME", "Gold")
     starting_balance: int = _int("STARTING_BALANCE", 5000)

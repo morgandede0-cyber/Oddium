@@ -12,6 +12,7 @@ from discord.ext import commands, tasks
 from config import SETTINGS
 from legacy_bet.storage.database import Database
 from legacy_bet.betting.economy import EconomyAdapter
+from legacy_bet.integrations.altherya.client import AltheryaBridgeClient
 from legacy_bet.providers.gateway import OddsAPI
 from legacy_bet.discord_ui.panel import PanelManager
 from legacy_bet.betting.service import BettingService
@@ -38,7 +39,8 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 db = Database()
-economy = EconomyAdapter(db)
+altherya_bridge = AltheryaBridgeClient(SETTINGS.altherya_bridge_url, SETTINGS.altherya_bridge_token)
+economy = EconomyAdapter(db, altherya_bridge)
 odds_api = OddsAPI(db)
 service = BettingService(db, economy, odds_api)
 panel = PanelManager(bot, service)
@@ -387,6 +389,11 @@ async def before_scores_loop():
 
 
 async def notify_settlement(event: dict):
+    # Altherya receives every final ticket result independently from Oddium DM preferences.
+    bridge_event = dict(event)
+    bridge_event["type"] = "ticket_settled"
+    await altherya_bridge.emit(bridge_event)
+
     prefs = await service.ensure_preferences(event["user_id"])
     if not prefs["dm_notifications"] or not prefs["notify_result"]:
         return

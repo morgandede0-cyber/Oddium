@@ -1,74 +1,69 @@
 from __future__ import annotations
 
-from config import SETTINGS
 from ..storage.database import Database, utcnow_iso
+from ..integrations.altherya.client import AltheryaBridgeClient, AltheryaBridgeError
 
 
 class EconomyAdapter:
-    """Internal test economy with idempotent ledger operations.
+    """Oddium economy backed by Altherya's authoritative ``wallet_gold``.
 
-    To plug into the existing Legacy economy later, keep these public methods:
-    get_balance, debit, credit. `credit` is intentionally idempotent when the
-    same (user, reason, reference) is supplied, preventing double settlement.
+    Oddium keeps only its idempotency/audit ledger. It never maintains an
+    independent spendable balance when the Altherya bridge is configured.
     """
 
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, bridge: AltheryaBridgeClient):
         self.db = db
+        self.bridge = bridge
 
     async def ensure_user(self, user_id: int) -> None:
-        await self.db.execute(
-            "INSERT OR IGNORE INTO wallets(user_id,balance) VALUES(?,?)",
-            (user_id, SETTINGS.starting_balance),
-        )
+        # Kept for schema/backward compatibility; spendable Gold lives in Altherya.
+        await self.db.execute("INSERT OR IGNORE INTO wallets(user_id,balance) VALUES(?,0)", (user_id,))
 
     async def get_balance(self, user_id: int) -> int:
         await self.ensure_user(user_id)
-        row = await self.db.fetchone("SELECT balance FROM wallets WHERE user_id=?", (user_id,))
-        return int(row["balance"])
+        if not self.bridge.enabled:
+            raise AltheryaBridgeError("Gold indisponible : pont Altherya non configuré")
+        return await self.bridge.get_balance(user_id)
+
+    async def _already_recorded(self, user_id: int, reason: str, reference: str) -> bool:
+        row = await self.db.fetchone(
+            "SELECT 1 FROM wallet_transactions WHERE user_id=? AND reason=? AND reference=?",
+            (user_id, reason, reference),
+        )
+        return bool(row)
+
+    async def _record(self, user_id: int, amount: int, reason: str, reference: str) -> None:
+        try:
+            await self.db.execute(
+                "INSERT INTO wallet_transactions(user_id,amount,reason,reference,created_at) VALUES(?,?,?,?,?)",
+                (user_id, amount, reason, reference, utcnow_iso()),
+            )
+        except Exception:
+            # Remote operation is idempotent; retrying the business operation later
+            # safely repairs a crash between Altherya commit and local audit insert.
+            if not await self._already_recorded(user_id, reason, reference):
+                raise
 
     async def debit(self, user_id: int, amount: int, reason: str, reference: str) -> bool:
         if amount <= 0:
             return False
         await self.ensure_user(user_id)
-        db = await self.db.connect()
-        try:
-            await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute("SELECT 1 FROM wallet_transactions WHERE user_id=? AND reason=? AND reference=?", (user_id, reason, reference))
-            if await cur.fetchone():
-                await db.rollback()
-                return True
-            cur = await db.execute("SELECT balance FROM wallets WHERE user_id=?", (user_id,))
-            row = await cur.fetchone()
-            if row is None or int(row[0]) < amount:
-                await db.rollback()
-                return False
-            await db.execute("UPDATE wallets SET balance=balance-? WHERE user_id=?", (amount, user_id))
-            await db.execute(
-                "INSERT INTO wallet_transactions(user_id,amount,reason,reference,created_at) VALUES(?,?,?,?,?)",
-                (user_id, -amount, reason, reference, utcnow_iso()),
-            )
-            await db.commit()
+        if await self._already_recorded(user_id, reason, reference):
             return True
-        finally:
-            await db.close()
+        ok, _ = await self.bridge.mutate(user_id, -int(amount), reason, reference)
+        if not ok:
+            return False
+        await self._record(user_id, -int(amount), reason, reference)
+        return True
 
     async def credit(self, user_id: int, amount: int, reason: str, reference: str) -> bool:
         if amount <= 0:
             return False
         await self.ensure_user(user_id)
-        db = await self.db.connect()
-        try:
-            await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute("SELECT 1 FROM wallet_transactions WHERE user_id=? AND reason=? AND reference=?", (user_id, reason, reference))
-            if await cur.fetchone():
-                await db.rollback()
-                return False
-            await db.execute("UPDATE wallets SET balance=balance+? WHERE user_id=?", (amount, user_id))
-            await db.execute(
-                "INSERT INTO wallet_transactions(user_id,amount,reason,reference,created_at) VALUES(?,?,?,?,?)",
-                (user_id, amount, reason, reference, utcnow_iso()),
-            )
-            await db.commit()
-            return True
-        finally:
-            await db.close()
+        if await self._already_recorded(user_id, reason, reference):
+            return False
+        ok, _ = await self.bridge.mutate(user_id, int(amount), reason, reference)
+        if not ok:
+            return False
+        await self._record(user_id, int(amount), reason, reference)
+        return True
