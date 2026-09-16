@@ -1254,6 +1254,7 @@ class BettingService:
             "soccer_germany_bundesliga": ("bundesliga",),
             "soccer_italy_serie_a": ("serie a",),
             "soccer_uefa_champs_league": ("champions league", "ligue des champions"),
+            "soccer_uefa_europa_league": ("europa league", "ligue europa"),
         }.get(sport_key, ())
         return bool(raw and any(token in raw for token in expected))
 

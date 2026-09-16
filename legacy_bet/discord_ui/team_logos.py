@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOGO_DIR = ROOT / "assets" / "team_logos"
 INDEX_FILE = LOGO_DIR / "index.json"
 MANIFEST_URL = "https://raw.githubusercontent.com/frertommy/team-logos/main/manifest.json"
-ALLOWED_GROUPS = {"Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Champions League"}
+ALLOWED_GROUPS = {"Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "Champions League", "Europa League"}
 
 
 def normalize_name(value: str) -> str:

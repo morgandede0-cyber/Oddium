@@ -46,6 +46,8 @@ class FiveDollarClient:
         "soccer_germany_bundesliga": FiveDollarLeague((686337048,), "Bundesliga", "DE", ("1. Bundesliga",)),
         "soccer_italy_serie_a": FiveDollarLeague((3405541143,), "Serie A", "IT", ("Serie A Enilive",)),
         "soccer_uefa_champs_league": FiveDollarLeague((2187079931, 1318331555), "UEFA Champions League", "EUROPE", ("Champions League", "UEFA CL")),
+        # No hard-coded bootstrap id: resolve the account-specific 5Dollar id from /leagues.
+        "soccer_uefa_europa_league": FiveDollarLeague((), "UEFA Europa League", "EUROPE", ("Europa League", "UEFA EL", "UEL")),
     }
 
     def __init__(self, session_getter):
@@ -226,13 +228,18 @@ class FiveDollarClient:
                     ids: list[int] = []
                     for row in catalogue:
                         country = row.get("country") or {}
-                        if str(country.get("code") or "").upper() != wanted.country.upper():
+                        country_code = str(country.get("code") or "").upper()
+                        # UEFA catalogue rows can be tagged EUROPE, EU or WORLD depending
+                        # on the 5Dollar id family. Competition identity remains the strict gate.
+                        is_uefa = sport_key in {"soccer_uefa_champs_league", "soccer_uefa_europa_league"}
+                        if not is_uefa and country_code != wanted.country.upper():
                             continue
                         candidate = self._name_key(row.get("name"))
                         short = self._name_key(row.get("short_name"))
                         exact = candidate in names or short in names
                         champions = sport_key == "soccer_uefa_champs_league" and "champions league" in candidate
-                        if exact or champions:
+                        europa = sport_key == "soccer_uefa_europa_league" and "europa league" in candidate and "conference" not in candidate
+                        if exact or champions or europa:
                             try:
                                 ids.append(int(row["id"]))
                             except (KeyError, TypeError, ValueError):
@@ -498,6 +505,8 @@ class FiveDollarClient:
             return True
         if sport_key == "soccer_uefa_champs_league":
             return "champions league" in lname
+        if sport_key == "soccer_uefa_europa_league":
+            return "europa league" in lname and "conference" not in lname
         return False
 
     async def live_board_shells(self, *, force: bool = False) -> list[dict[str, Any]]:

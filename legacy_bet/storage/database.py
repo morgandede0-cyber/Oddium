@@ -262,6 +262,16 @@ class Database:
         current = await self.get_setting("active_competitions")
         if current == old_default:
             await self.set_setting("active_competitions", DEFAULT_ACTIVE_COMPETITIONS)
+        else:
+            # V47: existing installations on Oddium's previous six-league default
+            # gain Europa League automatically, while custom admin selections remain untouched.
+            previous_default = [
+                "soccer_france_ligue_one", "soccer_epl", "soccer_spain_la_liga",
+                "soccer_germany_bundesliga", "soccer_italy_serie_a",
+                "soccer_uefa_champs_league",
+            ]
+            if current == previous_default:
+                await self.set_setting("active_competitions", DEFAULT_ACTIVE_COMPETITIONS)
 
     async def _ensure_column(self, db: aiosqlite.Connection, table: str, column: str, definition: str) -> None:
         cur = await db.execute(f"PRAGMA table_info({table})")

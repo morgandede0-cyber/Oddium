@@ -38,6 +38,7 @@ def carousel_keys(active: list[str]) -> list[str]:
         "soccer_germany_bundesliga",
         "soccer_italy_serie_a",
         "soccer_uefa_champs_league",
+        "soccer_uefa_europa_league",
     ]
     return [k for k in preferred if k in active and k in COMPETITIONS]
 

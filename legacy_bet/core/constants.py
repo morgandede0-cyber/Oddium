@@ -5,6 +5,7 @@ COMPETITIONS = {
     "soccer_germany_bundesliga": {"name": "Bundesliga", "emoji": "🇩🇪", "league": "BL1"},
     "soccer_italy_serie_a": {"name": "Serie A", "emoji": "🇮🇹", "league": "SA"},
     "soccer_uefa_champs_league": {"name": "Ligue des Champions", "emoji": "🏆", "league": "CL"},
+    "soccer_uefa_europa_league": {"name": "Ligue Europa", "emoji": "🟠", "league": "UEL"},
 }
 
 DEFAULT_ACTIVE_COMPETITIONS = [
@@ -14,6 +15,7 @@ DEFAULT_ACTIVE_COMPETITIONS = [
     "soccer_germany_bundesliga",
     "soccer_italy_serie_a",
     "soccer_uefa_champs_league",
+    "soccer_uefa_europa_league",
 ]
 
 SELECTION_LABELS = {"HOME": "1", "DRAW": "N", "AWAY": "2"}
