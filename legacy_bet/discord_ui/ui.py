@@ -18,32 +18,7 @@ PARIS_TZ = ZoneInfo("Europe/Paris")
 ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 
-# Une seule fenêtre privée Oddium par utilisateur. Une nouvelle section remplace
-# la précédente au lieu d'empiler les réponses éphémères Discord.
-_PRIVATE_PAGES: dict[tuple[int, int], discord.InteractionMessage] = {}
-
-def _private_page_key(interaction: discord.Interaction) -> tuple[int, int]:
-    return (interaction.guild_id or 0, interaction.user.id)
-
-async def open_private_page(interaction: discord.Interaction, *, content=None, embed=None, view=None, files=None, attachments=None):
-    key = _private_page_key(interaction)
-    previous = _PRIVATE_PAGES.get(key)
-    edit_attachments = attachments if attachments is not None else (files or [])
-    if previous is not None:
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.defer(ephemeral=True)
-            await previous.edit(content=content, embed=embed, view=view, attachments=edit_attachments)
-            return previous
-        except (discord.NotFound, discord.HTTPException):
-            _PRIVATE_PAGES.pop(key, None)
-    if interaction.response.is_done():
-        msg = await interaction.followup.send(content=content, embed=embed, view=view, files=files or [], ephemeral=True, wait=True)
-    else:
-        await interaction.response.send_message(content=content, embed=embed, view=view, files=files or [], ephemeral=True)
-        msg = await interaction.original_response()
-    _PRIVATE_PAGES[key] = msg
-    return msg
+from .private_pages import show as open_private_page
 
 CAROUSEL_ASSETS = {
     "soccer_france_ligue_one": "carousel_ligue1.png",
