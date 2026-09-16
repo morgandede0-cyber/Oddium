@@ -12,6 +12,7 @@ from config import SETTINGS
 from ..core.constants import BET_STATUS_ICONS, COMPETITIONS
 from ..betting.service import BettingService
 from ..core.time_utils import parse_iso
+from .visuals import match_card, betslip_card
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
@@ -514,7 +515,11 @@ class ComboOutcomeButton(discord.ui.Button):
         if any(str(x['event_id'])==str(self.m['event_id']) for x in self.session.legs):
             await interaction.response.edit_message(content="⚠️ Ce match est déjà dans ton combiné.",embed=None,view=None);return
         self.session.legs.append({"event_id":str(self.m['event_id']),"selection":self.selection,"odd":self.odd,"home":self.m['home_team'],"away":self.m['away_team']})
-        await interaction.response.edit_message(content=f"✅ Sélection ajoutée. Ticket : **{len(self.session.legs)} choix** • cote **{self.session.total_odd():.2f}**",embed=None,view=None)
+        # V34 state animation: replace the chooser by the newly rendered slip instead of spawning noise.
+        slip = discord.File(betslip_card(self.session.legs, self.session.total_odd(), "building"), filename="oddium_betslip.png")
+        e = discord.Embed(title="◆ ODDIUM • SÉLECTION AJOUTÉE", description=f"**{len(self.session.legs)} sélection(s)** • cote cumulée **{self.session.total_odd():.2f}**", color=ODDIUM_GOLD)
+        e.set_image(url="attachment://oddium_betslip.png")
+        await interaction.response.edit_message(content=None, embed=e, view=None, attachments=[slip])
 
 
 class ComboPickOutcomeView(discord.ui.View):
@@ -1159,7 +1164,10 @@ class MatchSelect(discord.ui.Select):
         e.add_field(name=f"2 • {match['away_team']}", value=f"### `{_safe_odd(match['away_odd'])}`　{trend['away']}\nMarché normalisé　**{probs[2]}%**", inline=True)
         e.add_field(name="◆ MARKET PULSE", value="Les flèches indiquent le mouvement récent de la cote. Les pourcentages sont dérivés des cotes normalisées, pas un pronostic Oddium.", inline=False)
         e.set_footer(text=_footer("Market • clique 1 / N / 2 • cote revérifiée avant débit"))
-        await interaction.response.send_message(embed=e, view=MatchBetView(self.service, match), ephemeral=True)
+        # V34: the market is now carried by a dynamically rendered Oddium card.
+        card = discord.File(match_card(dict(match), "prematch"), filename="oddium_match.png")
+        e.set_image(url="attachment://oddium_match.png")
+        await interaction.response.send_message(embed=e, view=MatchBetView(self.service, match), file=card, ephemeral=True)
 
 # --- Match Center -----------------------------------------------------------
 
