@@ -25,7 +25,7 @@ La clé 5Dollar doit être ajoutée dans Coolify ou `.env`, jamais dans Git.
 
 ## Démarrage
 
-Docker/Coolify : utiliser `Dockerfile` ou `docker-compose.coolify.yml`.
+Docker/Coolify : utiliser `Dockerfile` ou `docker-compose.yaml`.
 
 Commandes principales : `/setup`, `/setup_live`, `/diagnostic_oddium`, `/admin_paris`.
 

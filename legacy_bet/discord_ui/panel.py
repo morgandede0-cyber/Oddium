@@ -6,7 +6,6 @@ import asyncio
 import discord
 
 from ..betting.service import BettingService
-from ..core.constants import COMPETITIONS
 from ..discord_ui.ui import MainPanelView, LivePanelView, build_title_embed, carousel_keys, CAROUSEL_ASSETS, _live_embed
 
 ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"

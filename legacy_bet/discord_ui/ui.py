@@ -27,6 +27,7 @@ CAROUSEL_ASSETS = {
     "soccer_germany_bundesliga": "carousel_bundesliga.png",
     "soccer_italy_serie_a": "carousel_seriea.png",
     "soccer_uefa_champs_league": "carousel_champions.png",
+    "soccer_uefa_europa_league": "carousel_league-europa.png",
 }
 
 
@@ -139,9 +140,10 @@ class OpenLeagueButton(discord.ui.Button):
         if not await GUARD.allow(interaction):
             return
         sport_key = view.active[view.index]
+        await interaction.response.defer(ephemeral=True, thinking=False)
         matches = await view.service.matches_for_window(sport_key, "future", 25)
         embed = await build_league_embed(view.service, sport_key, matches)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=embed,
             view=MatchBrowserView(view.service, view.active, matches, sport_key),
         )
@@ -170,8 +172,9 @@ class LeagueCarouselView(discord.ui.View):
 
     async def refresh(self, interaction: discord.Interaction):
         self._rebuild()
+        await interaction.response.defer(ephemeral=True, thinking=False)
         embed = await build_carousel_embed(self.service, self.active, self.index)
-        await interaction.response.edit_message(embed=embed, view=self, attachments=carousel_attachments(self.active, self.index))
+        await interaction.edit_original_response(embed=embed, view=self, attachments=carousel_attachments(self.active, self.index))
 
 
 class BackToCarouselButton(discord.ui.Button):
@@ -188,8 +191,9 @@ class BackToCarouselButton(discord.ui.Button):
             index = self.active.index(self.current)
         except ValueError:
             index = 0
+        await interaction.response.defer(ephemeral=True, thinking=False)
         embed = await build_carousel_embed(self.service, self.active, index)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=embed,
             view=LeagueCarouselView(self.service, self.active, index),
             attachments=carousel_attachments(self.active, index),
@@ -384,7 +388,9 @@ class BrowseBackButton(discord.ui.Button):
         self.service=service; self.active=active; self.current=current
     async def callback(self, interaction):
         idx=self.active.index(self.current) if self.current in self.active else 0
-        await interaction.response.edit_message(embed=await build_carousel_embed(self.service,self.active,idx), view=BrowseLeagueCarouselView(self.service,self.active,idx), attachments=carousel_attachments(self.active, idx))
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        embed=await build_carousel_embed(self.service,self.active,idx)
+        await interaction.edit_original_response(embed=embed, view=BrowseLeagueCarouselView(self.service,self.active,idx), attachments=carousel_attachments(self.active, idx))
 
 
 class BrowseOpenLeagueButton(discord.ui.Button):
@@ -394,10 +400,11 @@ class BrowseOpenLeagueButton(discord.ui.Button):
         view=self.view
         if not isinstance(view,BrowseLeagueCarouselView): return
         key=view.active[view.index]
+        await interaction.response.defer(ephemeral=True, thinking=False)
         matches=await view.service.matches_for_window(key,"future",25)
         embed=await build_league_embed(view.service,key,matches)
         embed.set_footer(text=f"{len(matches)} match(s) • Consultation • pour miser utilise 🎟️ Parier")
-        await interaction.response.edit_message(embed=embed,view=BrowseMatchBrowserView(view.service,view.active,matches,key))
+        await interaction.edit_original_response(embed=embed,view=BrowseMatchBrowserView(view.service,view.active,matches,key),attachments=[])
 
 
 class BrowseNavButton(discord.ui.Button):
@@ -409,7 +416,9 @@ class BrowseNavButton(discord.ui.Button):
         if not isinstance(view,BrowseLeagueCarouselView): return
         view.index=(view.index+self.direction)%len(view.active)
         view._rebuild()
-        await interaction.response.edit_message(embed=await build_carousel_embed(view.service,view.active,view.index),view=view,attachments=carousel_attachments(view.active, view.index))
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        embed=await build_carousel_embed(view.service,view.active,view.index)
+        await interaction.edit_original_response(embed=embed,view=view,attachments=carousel_attachments(view.active, view.index))
 
 
 class BrowseLeagueCarouselView(discord.ui.View):
@@ -469,6 +478,9 @@ class BetLeagueOpenButton(discord.ui.Button):
         if not isinstance(view, BetLeagueCarouselView) or not view.active:
             return
         key = view.active[view.index]
+        # Acknowledge Discord before any provider/network work. 5Dollar may take
+        # longer than Discord's interaction deadline on a cold cache.
+        await interaction.response.defer(ephemeral=True, thinking=False)
         matches = await view.service.matches_for_window(key, "future", 25)
         unique = {str(m["event_id"]): m for m in matches}
         matches = sorted(unique.values(), key=lambda m: str(m["commence_time"]))
@@ -479,7 +491,7 @@ class BetLeagueOpenButton(discord.ui.Button):
                 description=f"**{COMPETITIONS[key]['name']}**\n\nAucun match disponible pour le moment.",
                 color=ODDIUM_GOLD,
             )
-            return await interaction.response.edit_message(embed=embed, view=view, attachments=carousel_attachments(view.active, view.index))
+            return await interaction.edit_original_response(embed=embed, view=view, attachments=carousel_attachments(view.active, view.index))
         session = BetCarouselSession(view.service, view.active, matches, view.mode)
         await session.show(interaction)
 
@@ -584,7 +596,11 @@ class BetCarouselSession:
 
     async def show(self,interaction):
         # Components V2 let Oddium put the date controls above the content.
-        await interaction.response.edit_message(content=None, embed=None, attachments=[], view=self.build_layout())
+        layout = self.build_layout()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(content=None, embed=None, attachments=[], view=layout)
+        else:
+            await interaction.response.edit_message(content=None, embed=None, attachments=[], view=layout)
 
     async def refresh(self,interaction):
         await interaction.response.edit_message(content=None, embed=None, attachments=[], view=self.build_layout())
@@ -759,7 +775,9 @@ class QuickHomeView(discord.ui.View):
     @discord.ui.button(label="Voir les matchs",emoji="⚽",style=discord.ButtonStyle.primary)
     async def matches(self,interaction,button):
         if not self.active:return await interaction.response.send_message("Aucun championnat actif.",ephemeral=True)
-        await interaction.response.edit_message(embed=await build_carousel_embed(self.service,self.active,0),view=BrowseLeagueCarouselView(self.service,self.active,0),attachments=carousel_attachments(self.active,0))
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        embed=await build_carousel_embed(self.service,self.active,0)
+        await interaction.edit_original_response(embed=embed,view=BrowseLeagueCarouselView(self.service,self.active,0),attachments=carousel_attachments(self.active,0))
     @discord.ui.button(label="Parier",emoji="🎟️",style=discord.ButtonStyle.success)
     async def bet(self,interaction,button):
         e=discord.Embed(title="🎟️ CHOISIS TON TYPE DE PARI",description="🎯 **Pari simple** — un pronostic 1/N/2\n🧩 **Pari combiné** — plusieurs matchs, une cote totale",color=discord.Color.gold())
@@ -1125,6 +1143,7 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(label="Matchs", emoji="⚽", style=discord.ButtonStyle.primary, custom_id="oddium:v13:matches", row=0)
     async def matches(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
         active = carousel_keys(await self.service.active_competitions())
         if not active:
             return await interaction.response.send_message("Aucun championnat actif.", ephemeral=True)
@@ -1149,14 +1168,17 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(label="Mes paris", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
     async def mybets(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
         await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service), replace_existing=True)
 
     @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
     async def live(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
         await open_private_page(interaction, embed=await _live_embed(self.service), view=LivePanelView(self.service), replace_existing=True)
 
     @discord.ui.button(label="Classement", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
     async def rank(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
         e = await _leaderboard_embed(self.service, interaction.client)
         await open_private_page(interaction, embed=e, view=RankProfileView(self.service), replace_existing=True)
 
