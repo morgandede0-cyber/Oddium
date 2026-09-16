@@ -22,3 +22,9 @@ def test_live_design_has_single_canonical_builder():
 def test_carousel_assets_are_still_used():
     assert "CAROUSEL_ASSETS" in UI
     assert 'e.set_image(url=f"attachment://{filename}")' in UI
+
+
+def test_title_embed_does_not_await_inside_sync_generator():
+    ui = (ROOT / "legacy_bet" / "discord_ui" / "ui.py").read_text(encoding="utf-8")
+    assert 'sum(len(await service.matches_for_window' not in ui
+    assert 'for key in active:\n        matches = await service.matches_for_window' in ui
