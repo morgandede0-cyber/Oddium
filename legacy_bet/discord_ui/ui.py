@@ -566,31 +566,28 @@ class BetCarouselSession:
         for leg in self.legs: total*=float(leg["odd"])
         return total
 
-    async def render(self):
+    def match_text(self):
+        """Text block used by the Components V2 betting page."""
         m=self.match; mode="PARI SIMPLE" if self.mode=="simple" else "PARI COMBINÉ"
-        day_label=self.selected_day.strftime("%d/%m/%Y")
-        e=discord.Embed(
-            title=f"◈ ODDIUM • {mode}",
-            description=(f"**{m['competition_name']}**　•　`{fmt_dt(m['commence_time'])}`\n"
-                         f"### {m['home_team']}　　VS　　{m['away_team']}"),
-            color=ODDIUM_GOLD,
-        )
-        e.add_field(name=f"1 • {m['home_team']}",value=f"### `{_safe_odd(m['home_odd'])}`",inline=True)
-        e.add_field(name="N • NUL",value=f"### `{_safe_odd(m['draw_odd'])}`",inline=True)
-        e.add_field(name=f"2 • {m['away_team']}",value=f"### `{_safe_odd(m['away_odd'])}`",inline=True)
+        lines=[
+            f"## ◈ ODDIUM • {mode}",
+            f"**{m['competition_name']}**　•　`{fmt_dt(m['commence_time'])}`",
+            f"### {m['home_team']}　　VS　　{m['away_team']}",
+        ]
         if self.mode=="combo":
-            e.add_field(name="TICKET COMBINÉ",value=f"**{len(self.legs)} sélection(s)** • cote `{self.total_odd():.2f}`\nLe ticket détaillé s'actualise dans sa fenêtre dédiée.",inline=False)
-        e.set_footer(text=_footer("Date en haut • match en bas • même fenêtre privée"))
-        card=discord.File(match_card(dict(m),"prematch"),filename="oddium_match.png"); e.set_image(url="attachment://oddium_match.png")
-        return e,card
+            lines += ["", f"**TICKET COMBINÉ** • {len(self.legs)} sélection(s) • cote `{self.total_odd():.2f}`"]
+        return "\n".join(lines)
+
+    def build_layout(self):
+        return BetMatchCarouselLayout(self)
 
     async def show(self,interaction):
-        e,card=await self.render()
-        await interaction.response.edit_message(embed=e,view=BetMatchCarouselView(self),attachments=[card])
+        # Components V2 let Oddium put the date controls above the content.
+        await interaction.response.edit_message(content=None, embed=None, attachments=[], view=self.build_layout())
 
     async def refresh(self,interaction):
-        e,card=await self.render()
-        await interaction.response.edit_message(embed=e,view=BetMatchCarouselView(self),attachments=[card])
+        await interaction.response.edit_message(content=None, embed=None, attachments=[], view=self.build_layout())
+
 
     async def ensure_slip(self,interaction):
         """The combo ticket is the single allowed extra ephemeral page and is then edited in place."""
@@ -650,25 +647,42 @@ class CarouselOutcomeButton(discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         await s.ensure_slip(interaction)
         try:
-            e,card=await s.render(); await interaction.message.edit(embed=e,view=BetMatchCarouselView(s),attachments=[card])
-        except (discord.NotFound,discord.HTTPException): pass
+            await interaction.message.edit(content=None, embed=None, attachments=[], view=s.build_layout())
+        except (discord.NotFound,discord.HTTPException):
+            pass
 
 
-class BetMatchCarouselView(discord.ui.View):
+class BetMatchCarouselLayout(discord.ui.LayoutView):
+    """Components V2 layout: DATE TOP -> CONTENT -> MARKET -> MATCH BOTTOM."""
     def __init__(self,session):
-        super().__init__(timeout=600); self.session=session; m=session.match
-        # Row 0: date only.  Row 1: betting outcomes.  Row 2: match only.
-        self.add_item(BetDayNav(-1))
-        self.add_item(BetDateDisplay(session))
-        self.add_item(BetDayNav(1))
+        super().__init__(timeout=600)
+        self.session=session
+        m=session.match
 
-        self.add_item(CarouselOutcomeButton(session,"HOME","1",m["home_odd"]))
-        self.add_item(CarouselOutcomeButton(session,"DRAW","N",m["draw_odd"]))
-        self.add_item(CarouselOutcomeButton(session,"AWAY","2",m["away_odd"]))
+        # 1) DATE — physically first component in the Discord message.
+        self.add_item(discord.ui.ActionRow(BetDayNav(-1), BetDateDisplay(session), BetDayNav(1)))
 
-        self.add_item(BetCarouselNav(-1))
-        self.add_item(BetMatchDisplay(session))
-        self.add_item(BetCarouselNav(1))
+        # 2) Match information.
+        self.add_item(discord.ui.TextDisplay(session.match_text()))
+
+        # 3) Dynamic logo VS logo graphic.
+        card=discord.File(match_card(dict(m),"prematch"), filename="oddium_match.png")
+        gallery=discord.ui.MediaGallery()
+        gallery.add_item(media=card, description=f"{m['home_team']} VS {m['away_team']}")
+        self.add_item(gallery)
+
+        # 4) 1 / N / 2 choices.
+        self.add_item(discord.ui.ActionRow(
+            CarouselOutcomeButton(session,"HOME","1",m["home_odd"]),
+            CarouselOutcomeButton(session,"DRAW","N",m["draw_odd"]),
+            CarouselOutcomeButton(session,"AWAY","2",m["away_odd"]),
+        ))
+
+        # 5) MATCH — physically last component in the Discord message.
+        self.add_item(discord.ui.ActionRow(BetCarouselNav(-1), BetMatchDisplay(session), BetCarouselNav(1)))
+
+
+BetMatchCarouselView = BetMatchCarouselLayout
 
 
 def combo_text_embed(session):
