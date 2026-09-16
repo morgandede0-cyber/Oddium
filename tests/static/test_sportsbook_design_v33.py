@@ -4,7 +4,7 @@ UI = (Path(__file__).resolve().parents[2] / "legacy_bet" / "discord_ui" / "ui.py
 
 
 def test_v33_sportsbook_signature_surfaces():
-    for marker in ("ODDIUM • SPORTSBOOK", "LEAGUE LOBBY", "FEATURED MARKETS", "ODDIUM • MATCH BOARD", "ODDIUM • MARKET", "MARKET PULSE", "ODDIUM • BET SLIP"):
+    for marker in ("ODDIUM • SPORTSBOOK", "LEAGUE LOBBY", "FEATURED MARKETS", "ODDIUM • MATCH BOARD", "ODDIUM • MARKET", "MARKET PULSE", "ODDIUM • PARI COMBINÉ"):
         assert marker in UI
 
 

@@ -84,17 +84,3 @@ def _centered_box(d,box,label,value):
     x1,y1,x2,y2=box; f1=_font(18,True); f2=_font(25,True)
     for text,f,y,c in ((label,f1,y1+12,MUTED),(value,f2,y1+43,TEXT)):
         b=d.textbbox((0,0),text,font=f); d.text(((x1+x2-(b[2]-b[0]))/2,y),text,font=f,fill=c)
-
-def betslip_card(legs:list,total:float,state='building')->BytesIO:
-    W,H=900,max(430,260+len(legs)*76); im=Image.new('RGB',(W,H),BG); d=ImageDraw.Draw(im)
-    d.rounded_rectangle((25,25,W-25,H-25),26,fill=PANEL,outline=GOLD,width=3)
-    d.text((55,52),'ODDIUM',font=_font(28,True),fill=GOLD); d.text((55,92),'BET SLIP',font=_font(18,True),fill=MUTED)
-    d.text((W-235,58),f'{len(legs):02d} SÉLECTIONS',font=_font(18,True),fill=TEXT)
-    y=145
-    for i,l in enumerate(legs[:10],1):
-        pick={'HOME':l.get('home'),'DRAW':'Match nul','AWAY':l.get('away')}.get(l.get('selection'),'—')
-        d.text((58,y),f'{i:02d}  {l.get("home","?")} — {l.get("away","?")}'[:55],font=_font(17,True),fill=TEXT)
-        d.text((88,y+29),f'{pick}   @ {float(l.get("odd") or 0):.2f}',font=_font(16),fill=GOLD); y+=72
-    d.line((55,H-120,W-55,H-120),fill=(55,57,62),width=2)
-    d.text((55,H-92),'COTE TOTALE',font=_font(17,True),fill=MUTED); val=f'{total:.2f}'; b=d.textbbox((0,0),val,font=_font(32,True)); d.text((W-55-(b[2]-b[0]),H-101),val,font=_font(32,True),fill=GOLD)
-    out=BytesIO(); im.save(out,'PNG',optimize=True); out.seek(0); return out

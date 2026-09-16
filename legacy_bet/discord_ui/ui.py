@@ -12,10 +12,38 @@ from config import SETTINGS
 from ..core.constants import BET_STATUS_ICONS, COMPETITIONS
 from ..betting.service import BettingService
 from ..core.time_utils import parse_iso
-from .visuals import match_card, betslip_card
+from .visuals import match_card
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
+
+
+# Une seule fenêtre privée Oddium par utilisateur. Une nouvelle section remplace
+# la précédente au lieu d'empiler les réponses éphémères Discord.
+_PRIVATE_PAGES: dict[tuple[int, int], discord.InteractionMessage] = {}
+
+def _private_page_key(interaction: discord.Interaction) -> tuple[int, int]:
+    return (interaction.guild_id or 0, interaction.user.id)
+
+async def open_private_page(interaction: discord.Interaction, *, content=None, embed=None, view=None, files=None, attachments=None):
+    key = _private_page_key(interaction)
+    previous = _PRIVATE_PAGES.get(key)
+    edit_attachments = attachments if attachments is not None else (files or [])
+    if previous is not None:
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=True)
+            await previous.edit(content=content, embed=embed, view=view, attachments=edit_attachments)
+            return previous
+        except (discord.NotFound, discord.HTTPException):
+            _PRIVATE_PAGES.pop(key, None)
+    if interaction.response.is_done():
+        msg = await interaction.followup.send(content=content, embed=embed, view=view, files=files or [], ephemeral=True, wait=True)
+    else:
+        await interaction.response.send_message(content=content, embed=embed, view=view, files=files or [], ephemeral=True)
+        msg = await interaction.original_response()
+    _PRIVATE_PAGES[key] = msg
+    return msg
 
 CAROUSEL_ASSETS = {
     "soccer_france_ligue_one": "carousel_ligue1.png",
@@ -419,115 +447,161 @@ class BrowseLeagueCarouselView(discord.ui.View):
 
 
 class BetModeView(discord.ui.View):
-    def __init__(self,service:BettingService,active:list[str]):
-        super().__init__(timeout=180); self.service=service; self.active=active
+    """Entry point. Both modes now open the same visual match-carousel pattern."""
+    def __init__(self, service: BettingService, active: list[str]):
+        super().__init__(timeout=180); self.service=service; self.active=[k for k in active if k in COMPETITIONS]
+
+    async def _matches(self):
+        rows=[]
+        for key in self.active:
+            rows.extend(await self.service.matches_for_window(key, "future", 25))
+        # Stable chronological carousel; one real fixture only.
+        unique={str(m["event_id"]):m for m in rows}
+        return sorted(unique.values(), key=lambda m: str(m["commence_time"]))
 
     @discord.ui.button(label="SIMPLE",emoji="🎯",style=discord.ButtonStyle.success)
-    async def simple(self,interaction:discord.Interaction,button:discord.ui.Button):
-        if not self.active:
-            await interaction.response.send_message("Aucun championnat actif.",ephemeral=True); return
-        embed=await build_carousel_embed(self.service,self.active,0)
-        embed.title="🎯 PARI SIMPLE • " + embed.title
-        embed.description="Choisis un championnat, puis un match et ton pronostic **1 / N / 2**."
-        await interaction.response.edit_message(embed=embed,view=LeagueCarouselView(self.service,self.active,0),attachments=carousel_attachments(self.active, 0))
+    async def simple(self, interaction: discord.Interaction, button: discord.ui.Button):
+        matches=await self._matches()
+        if not matches:return await interaction.response.edit_message(embed=_empty_bet_carousel("PARI SIMPLE"),view=HomeReturnView(self.service),attachments=[])
+        session=BetCarouselSession(self.service,self.active,matches,"simple")
+        await session.show(interaction)
 
     @discord.ui.button(label="COMBINÉ",emoji="🧩",style=discord.ButtonStyle.primary)
-    async def combo(self,interaction:discord.Interaction,button:discord.ui.Button):
-        session=ComboSession(self.service,self.active)
-        await interaction.response.edit_message(
-            embed=await session.embed(),
-            view=ComboLeagueCarouselView(session),
-            attachments=carousel_attachments(session.active, session.index),
-        )
+    async def combo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        matches=await self._matches()
+        if not matches:return await interaction.response.edit_message(embed=_empty_bet_carousel("PARI COMBINÉ"),view=HomeReturnView(self.service),attachments=[])
+        session=BetCarouselSession(self.service,self.active,matches,"combo")
+        await session.show(interaction)
 
 
-class ComboSession:
-    def __init__(self,service,active):
-        self.service=service; self.active=[k for k in active if k in COMPETITIONS]; self.index=0; self.legs=[]
+def _empty_bet_carousel(mode: str):
+    return discord.Embed(title=f"◈ ODDIUM • {mode}",description="Aucun match disponible pour le moment.",color=ODDIUM_GOLD)
+
+
+class BetCarouselSession:
+    """One private navigation page. A carousel item is one complete fixture with both team logos."""
+    def __init__(self,service,active,matches,mode):
+        self.service=service; self.active=active; self.matches=list(matches); self.mode=mode; self.index=0
+        self.legs=[]; self.slip_message=None
+
+    @property
+    def match(self): return self.matches[self.index]
+
     def total_odd(self):
         total=1.0
-        for x in self.legs: total*=float(x['odd'])
+        for leg in self.legs: total*=float(leg["odd"])
         return total
-    async def embed(self):
-        info=COMPETITIONS[self.active[self.index]] if self.active else {"emoji":"⚽","name":"Aucune ligue"}
-        matches=await self.service.matches_for_window(self.active[self.index],"future",25) if self.active else []
+
+    async def render(self):
+        m=self.match; mode="PARI SIMPLE" if self.mode=="simple" else "PARI COMBINÉ"
         e=discord.Embed(
-            title="◈  ODDIUM • BET SLIP",
-            description=(
-                _bookmaker_header("COMBINÉ", f"{info['emoji']} **{info['name']}**　•　Ligue {self.index + 1:02d}/{len(self.active):02d}")
-                + "\n\nNavigue entre les championnats et ajoute tes sélections au ticket."
-            ),
+            title=f"◈ ODDIUM • {mode}",
+            description=(f"**{m['competition_name']}**　•　`{fmt_dt(m['commence_time'])}`\n"
+                         f"### {m['home_team']}　　VS　　{m['away_team']}\n"
+                         f"Match **{self.index+1}/{len(self.matches)}**"),
             color=ODDIUM_GOLD,
         )
-        if self.legs:
-            lines=[]
-            for i,l in enumerate(self.legs,1):
-                lab={"HOME":"1","DRAW":"N","AWAY":"2"}[l['selection']]
-                pick={"HOME":l['home'],"DRAW":"Match nul","AWAY":l['away']}[l['selection']]
-                lines.append(f"`{i:02d}` **{l['home']} — {l['away']}**\n　└ {lab} • **{pick}**　`@ {l['odd']:.2f}`")
-            e.add_field(name=f"🎟️ BET SLIP　•　{len(self.legs)}/10",value="\n\n".join(lines)[:1024],inline=False)
-            e.add_field(name="COTE TOTALE",value=f"### `{self.total_odd():.2f}`",inline=True)
-            e.add_field(name="STATUT",value="### PRÊT" if len(self.legs)>=2 else "### +1 SÉLECTION",inline=True)
-        else:
-            e.add_field(name="🎟️ BET SLIP", value="*Ticket vide*\nAjoute au minimum **2 sélections**.", inline=False)
-        e.add_field(name="MARCHÉ DISPONIBLE",value=f"**{len(matches)} match(s)**　•　`1` `N` `2`",inline=False)
-        e.set_footer(text=_footer("Bet Slip • maximum 10 sélections"))
-        if self.active:
-            sport_key = self.active[self.index]
-            if sport_key in CAROUSEL_ASSETS:
-                e.set_image(url=f"attachment://{CAROUSEL_ASSETS[sport_key]}")
-        return e
+        e.add_field(name=f"1 • {m['home_team']}",value=f"### `{_safe_odd(m['home_odd'])}`",inline=True)
+        e.add_field(name="N • NUL",value=f"### `{_safe_odd(m['draw_odd'])}`",inline=True)
+        e.add_field(name=f"2 • {m['away_team']}",value=f"### `{_safe_odd(m['away_odd'])}`",inline=True)
+        if self.mode=="combo":
+            e.add_field(name="TICKET COMBINÉ",value=f"**{len(self.legs)} sélection(s)** • cote `{self.total_odd():.2f}`\nLe ticket détaillé s'actualise dans sa fenêtre dédiée.",inline=False)
+        e.set_footer(text=_footer("◀ ▶ change de match • les deux logos correspondent aux équipes affichées"))
+        card=discord.File(match_card(dict(m),"prematch"),filename="oddium_match.png"); e.set_image(url="attachment://oddium_match.png")
+        return e,card
+
+    async def show(self,interaction):
+        e,card=await self.render()
+        await interaction.response.edit_message(embed=e,view=BetMatchCarouselView(self),attachments=[card])
+
+    async def refresh(self,interaction):
+        e,card=await self.render()
+        await interaction.response.edit_message(embed=e,view=BetMatchCarouselView(self),attachments=[card])
+
+    async def ensure_slip(self,interaction):
+        """The combo ticket is the single allowed extra ephemeral page and is then edited in place."""
+        embed=combo_text_embed(self)
+        view=ComboSlipView(self)
+        if self.slip_message is not None:
+            try:
+                await self.slip_message.edit(embed=embed,view=view,attachments=[])
+                return self.slip_message
+            except (discord.NotFound,discord.HTTPException):
+                self.slip_message=None
+        self.slip_message=await interaction.followup.send(embed=embed,view=view,ephemeral=True,wait=True)
+        return self.slip_message
 
 
-class ComboNavButton(discord.ui.Button):
-    def __init__(self,d): self.d=d; super().__init__(emoji="◀️" if d<0 else "▶️",style=discord.ButtonStyle.secondary,row=0)
+class BetCarouselNav(discord.ui.Button):
+    def __init__(self,direction):
+        self.direction=direction
+        super().__init__(emoji="◀️" if direction<0 else "▶️",style=discord.ButtonStyle.secondary,row=0)
     async def callback(self,interaction):
-        v=self.view
-        if not isinstance(v,ComboLeagueCarouselView):return
-        v.session.index=(v.session.index+self.d)%len(v.session.active); v.rebuild()
-        await interaction.response.edit_message(
-            embed=await v.session.embed(),
-            view=v,
-            attachments=carousel_attachments(v.session.active, v.session.index),
-        )
+        s=self.view.session; s.index=(s.index+self.direction)%len(s.matches); await s.refresh(interaction)
 
 
-class ComboAddSelect(discord.ui.Select):
-    def __init__(self,session,matches):
-        opts=[]
-        for m in matches[:25]:
-            opts.append(discord.SelectOption(label=f"{m['home_team']} - {m['away_team']}"[:100],description=f"1 {m['home_odd']:.2f} • N {m['draw_odd']:.2f} • 2 {m['away_odd']:.2f}"[:100],value=str(m['event_id']),emoji="⚽"))
-        super().__init__(placeholder="Ajouter une sélection…",options=opts,min_values=1,max_values=1,row=1)
-        self.session=session
+class CarouselOutcomeButton(discord.ui.Button):
+    def __init__(self,session,selection,label,odd):
+        style=discord.ButtonStyle.secondary if selection=="DRAW" else discord.ButtonStyle.primary
+        super().__init__(label=f"{label}  {float(odd):.2f}",style=style,row=1)
+        self.session=session; self.selection=selection; self.odd=float(odd)
     async def callback(self,interaction):
-        m=await self.session.service.db.fetchone("SELECT * FROM matches WHERE event_id=?",(self.values[0],))
-        if not m:return await interaction.response.send_message("Match indisponible.",ephemeral=True)
-        await interaction.response.send_message(
-            embed=discord.Embed(title=f"🧩 {m['home_team']} — {m['away_team']}",description="Choisis le résultat à ajouter au combiné.",color=discord.Color.blurple()),
-            view=ComboPickOutcomeView(self.session,m),ephemeral=True)
+        s=self.session; m=s.match
+        if s.mode=="simple":
+            return await interaction.response.send_modal(StakeModal(s.service,str(m["event_id"]),self.selection,self.odd))
+        if any(str(x["event_id"])==str(m["event_id"]) for x in s.legs):
+            return await interaction.response.send_message("⚠️ Ce match est déjà présent dans ton combiné.",ephemeral=True)
+        if len(s.legs)>=10:return await interaction.response.send_message("Maximum **10 sélections** par combiné.",ephemeral=True)
+        s.legs.append({"event_id":str(m["event_id"]),"selection":self.selection,"odd":self.odd,"home":m["home_team"],"away":m["away_team"]})
+        await interaction.response.defer(ephemeral=True)
+        await s.ensure_slip(interaction)
+        # Keep the carousel itself current too, without creating another page.
+        try:
+            e,card=await s.render(); await interaction.message.edit(embed=e,view=BetMatchCarouselView(s),attachments=[card])
+        except (discord.NotFound,discord.HTTPException): pass
 
 
-class ComboOutcomeButton(discord.ui.Button):
-    def __init__(self,session,m,selection,label,odd):
-        super().__init__(label=f"{label} • {odd:.2f}",style=discord.ButtonStyle.success if selection!='DRAW' else discord.ButtonStyle.primary)
-        self.session=session;self.m=m;self.selection=selection;self.odd=float(odd)
-    async def callback(self,interaction):
-        if any(str(x['event_id'])==str(self.m['event_id']) for x in self.session.legs):
-            await interaction.response.edit_message(content="⚠️ Ce match est déjà dans ton combiné.",embed=None,view=None);return
-        self.session.legs.append({"event_id":str(self.m['event_id']),"selection":self.selection,"odd":self.odd,"home":self.m['home_team'],"away":self.m['away_team']})
-        # V34 state animation: replace the chooser by the newly rendered slip instead of spawning noise.
-        slip = discord.File(betslip_card(self.session.legs, self.session.total_odd(), "building"), filename="oddium_betslip.png")
-        e = discord.Embed(title="◆ ODDIUM • SÉLECTION AJOUTÉE", description=f"**{len(self.session.legs)} sélection(s)** • cote cumulée **{self.session.total_odd():.2f}**", color=ODDIUM_GOLD)
-        e.set_image(url="attachment://oddium_betslip.png")
-        await interaction.response.edit_message(content=None, embed=e, view=None, attachments=[slip])
+class BetMatchCarouselView(discord.ui.View):
+    def __init__(self,session):
+        super().__init__(timeout=600); self.session=session; m=session.match
+        self.add_item(BetCarouselNav(-1)); self.add_item(BetCarouselNav(1))
+        self.add_item(CarouselOutcomeButton(session,"HOME","1",m["home_odd"]))
+        self.add_item(CarouselOutcomeButton(session,"DRAW","N",m["draw_odd"]))
+        self.add_item(CarouselOutcomeButton(session,"AWAY","2",m["away_odd"]))
 
 
-class ComboPickOutcomeView(discord.ui.View):
-    def __init__(self,session,m):
-        super().__init__(timeout=120)
-        self.add_item(ComboOutcomeButton(session,m,"HOME","1",m['home_odd']))
-        self.add_item(ComboOutcomeButton(session,m,"DRAW","N",m['draw_odd']))
-        self.add_item(ComboOutcomeButton(session,m,"AWAY","2",m['away_odd']))
+def combo_text_embed(session):
+    e=discord.Embed(title="🎟️ ODDIUM • PARI COMBINÉ",color=ODDIUM_GOLD)
+    if not session.legs:
+        e.description=f"{ODDIUM_DIVIDER}\n**TICKET VIDE**\nAjoute au minimum **2 sélections** depuis le carrousel.\n{ODDIUM_DIVIDER}"
+    else:
+        lines=[]
+        for i,l in enumerate(session.legs,1):
+            lab={"HOME":"1","DRAW":"N","AWAY":"2"}[l["selection"]]
+            pick={"HOME":l["home"],"DRAW":"Match nul","AWAY":l["away"]}[l["selection"]]
+            lines.append(f"`{i:02d}` **{l['home']} — {l['away']}**\n　└ `{lab}` **{pick}**　@ `{float(l['odd']):.2f}`")
+        e.description=f"{ODDIUM_DIVIDER}\n"+"\n\n".join(lines)+f"\n{ODDIUM_DIVIDER}"
+    e.add_field(name="SÉLECTIONS",value=f"**{len(session.legs)}/10**",inline=True)
+    e.add_field(name="COTE TOTALE",value=f"**{session.total_odd():.2f}**",inline=True)
+    e.add_field(name="STATUT",value="**PRÊT À VALIDER**" if len(session.legs)>=2 else "**EN CONSTRUCTION**",inline=True)
+    e.set_footer(text=_footer("Ticket combiné • cette fenêtre s'actualise sans se dupliquer"))
+    return e
+
+
+class ComboSlipView(discord.ui.View):
+    """Only ticket management lives here: clear and validate."""
+    def __init__(self,session):
+        super().__init__(timeout=900); self.session=session
+
+    @discord.ui.button(label="Vider",emoji="🗑️",style=discord.ButtonStyle.danger)
+    async def clear(self,interaction,button):
+        self.session.legs.clear()
+        await interaction.response.edit_message(embed=combo_text_embed(self.session),view=ComboSlipView(self.session),attachments=[])
+
+    @discord.ui.button(label="Valider",emoji="✅",style=discord.ButtonStyle.success)
+    async def validate(self,interaction,button):
+        if len(self.session.legs)<2:return await interaction.response.send_message("Ajoute au moins **2 matchs** au combiné.",ephemeral=True)
+        await interaction.response.send_modal(ComboStakeModal(self.session))
 
 
 class ComboStakeModal(discord.ui.Modal,title="🧩 Valider le combiné"):
@@ -535,59 +609,20 @@ class ComboStakeModal(discord.ui.Modal,title="🧩 Valider le combiné"):
     def __init__(self,session): super().__init__(timeout=180); self.session=session
     async def on_submit(self,interaction):
         raw=str(self.stake.value).replace(" ","").replace(",","")
-        if not raw.isdigit(): return await interaction.response.send_message("❌ Mise invalide.",ephemeral=True)
+        if not raw.isdigit():return await interaction.response.send_message("❌ Mise invalide.",ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         ok,reason,data=await self.session.service.place_combo_bet(interaction.user.id,self.session.legs,int(raw))
         if not ok:
-            if reason=="ODD_CHANGED": reason="Une cote a changé. Recrée le combiné pour accepter les nouvelles cotes."
+            if reason=="ODD_CHANGED":reason="Une cote a changé. Recompose le combiné pour accepter les nouvelles cotes."
             return await interaction.followup.send(f"❌ {reason}",ephemeral=True)
-        e=discord.Embed(title="✅ Combiné validé",color=discord.Color.green())
-        e.description=(f"🎟️ **COMBO-{data['combo_id']}**\n🧩 {len(self.session.legs)} sélections\n📈 Cote totale **{data['total_odd']:.2f}**\n"
-                       f"💰 Mise **{fmt_num(int(raw))} {SETTINGS.currency_name}**\n🏆 Gain potentiel **{fmt_num(data['payout'])} {SETTINGS.currency_name}**")
-        await interaction.followup.send(embed=e,ephemeral=True)
-
-
-class ComboValidateButton(discord.ui.Button):
-    def __init__(self,session): super().__init__(label="Valider le combiné",emoji="✅",style=discord.ButtonStyle.success,row=2);self.session=session
-    async def callback(self,interaction):
-        if len(self.session.legs)<2:return await interaction.response.send_message("Ajoute au moins **2 matchs** au combiné.",ephemeral=True)
-        await interaction.response.send_modal(ComboStakeModal(self.session))
-
-
-class ComboClearButton(discord.ui.Button):
-    def __init__(self,session): super().__init__(label="Vider",emoji="🗑️",style=discord.ButtonStyle.danger,row=2);self.session=session
-    async def callback(self,interaction):
-        self.session.legs.clear(); v=self.view
-        if isinstance(v,ComboLeagueCarouselView):
-            v.rebuild()
-            await interaction.response.edit_message(
-                embed=await self.session.embed(),
-                view=v,
-                attachments=carousel_attachments(self.session.active, self.session.index),
-            )
-
-
-class ComboLeagueCarouselView(discord.ui.View):
-    def __init__(self,session): super().__init__(timeout=600);self.session=session;self.rebuild()
-    def rebuild(self):
-        self.clear_items()
-        if not self.session.active:return
-        self.add_item(ComboNavButton(-1)); self.add_item(ComboNavButton(1))
-        # Select options are hydrated lazily by button below because __init__ can't await.
-        self.add_item(ComboChooseLeagueButton(self.session))
-        self.add_item(ComboValidateButton(self.session)); self.add_item(ComboClearButton(self.session))
-
-
-class ComboChooseLeagueButton(discord.ui.Button):
-    def __init__(self,session):
-        info=COMPETITIONS[session.active[session.index]]
-        super().__init__(label=f"Choisir dans {info['name']}"[:80],emoji="⚽",style=discord.ButtonStyle.primary,row=1);self.session=session
-    async def callback(self,interaction):
-        key=self.session.active[self.session.index]; matches=await self.session.service.matches_for_window(key,"future",25)
-        if not matches:return await interaction.response.send_message("Aucun match disponible dans ce championnat.",ephemeral=True)
-        view=discord.ui.View(timeout=120); view.add_item(ComboAddSelect(self.session,matches))
-        await interaction.response.send_message(f"🧩 **{COMPETITIONS[key]['name']}** — choisis un match :",view=view,ephemeral=True)
-
+        accepted=discord.Embed(title="✅ ODDIUM • COMBINÉ VALIDÉ",color=ODDIUM_GREEN)
+        accepted.description=(f"🎟️ **COMBO-{data['combo_id']}**\n🧩 **{len(self.session.legs)} sélections**\n📈 Cote **{data['total_odd']:.2f}**\n"
+                              f"💰 Mise **{fmt_num(int(raw))} {SETTINGS.currency_name}**\n🏆 Gain potentiel **{fmt_num(data['payout'])} {SETTINGS.currency_name}**")
+        if self.session.slip_message:
+            try: await self.session.slip_message.edit(embed=accepted,view=None,attachments=[])
+            except (discord.NotFound,discord.HTTPException): await interaction.followup.send(embed=accepted,ephemeral=True)
+        else: await interaction.followup.send(embed=accepted,ephemeral=True)
+        self.session.legs.clear()
 
 
 # ========================= ODDIUM EXPERIENCE =========================
@@ -761,7 +796,7 @@ class BrowseMatchSelect(discord.ui.Select):
         e.add_field(name="N  Match nul", value=f"### `{_safe_odd(m['draw_odd'])}` {trend['draw']}", inline=True)
         e.add_field(name=f"2  {m['away_team']}", value=f"### `{_safe_odd(m['away_odd'])}` {trend['away']}", inline=True)
         e.set_footer(text="Consultation • pour miser, utilise 🎟️ Parier")
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=e, view=HomeReturnView(self.service), attachments=[])
 
 
 async def _my_bets_embed(service, user_id):
@@ -943,7 +978,7 @@ class LivePanelView(discord.ui.View):
         matches = await self.service.live_matches(25)
         if not matches:
             return await interaction.response.send_message("⚽ Aucun match live actuellement.", ephemeral=True)
-        await interaction.response.send_message("**Choisis un match pour ouvrir sa fiche :**", view=LiveDetailsSelectView(self.service, matches), ephemeral=True)
+        await interaction.response.edit_message(content="**Choisis un match pour ouvrir sa fiche :**", embed=None, view=LiveDetailsSelectView(self.service, matches), attachments=[])
 
     @discord.ui.button(label="Suivre", style=discord.ButtonStyle.danger, emoji="🔔", custom_id="oddium:v13:live:follow", row=0)
     async def follow(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -951,7 +986,7 @@ class LivePanelView(discord.ui.View):
         if not matches:
             return await interaction.response.send_message("⚽ Aucun match live à suivre.", ephemeral=True)
         followed = await self.service.followed_event_ids(interaction.user.id)
-        await interaction.response.send_message("**Choisis le match à suivre :**", view=LiveFollowSelectView(self.service, matches, followed), ephemeral=True)
+        await interaction.response.edit_message(content="**Choisis le match à suivre :**", embed=None, view=LiveFollowSelectView(self.service, matches, followed), attachments=[])
 
     @discord.ui.button(label="Mes paris live", style=discord.ButtonStyle.success, emoji="🎟️", custom_id="oddium:v13:live:bets", row=0)
     async def bets(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -964,7 +999,7 @@ class LivePanelView(discord.ui.View):
             winning = (r["selection"] == "HOME" and isinstance(hs, int) and isinstance(aws, int) and hs > aws) or (r["selection"] == "AWAY" and isinstance(hs, int) and isinstance(aws, int) and aws > hs) or (r["selection"] == "DRAW" and isinstance(hs, int) and hs == aws)
             state = "🟢 EN POSITION" if winning else "⚪ EN COURS"
             lines.append(f"{state}  **{r['home_team']} `{hs}-{aws}` {r['away_team']}**\n　BET-{r['id']} • mise **{fmt_num(r['stake'])}** • retour **{fmt_num(r['potential_payout'])} {SETTINGS.currency_name}**")
-        await interaction.response.send_message(embed=discord.Embed(title="🎟️ MES PARIS LIVE", description="\n\n".join(lines), color=ODDIUM_GREEN), ephemeral=True)
+        await interaction.response.edit_message(content=None, embed=discord.Embed(title="🎟️ MES PARIS LIVE", description="\n\n".join(lines), color=ODDIUM_GREEN), view=HomeReturnView(self.service), attachments=[])
 
 
 class MainPanelView(discord.ui.View):
@@ -977,7 +1012,7 @@ class MainPanelView(discord.ui.View):
         active = carousel_keys(await self.service.active_competitions())
         if not active:
             return await interaction.response.send_message("Aucun championnat actif.", ephemeral=True)
-        await interaction.response.send_message(embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0), ephemeral=True)
+        await open_private_page(interaction, embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0))
 
     @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
@@ -994,20 +1029,20 @@ class MainPanelView(discord.ui.View):
         )
         e.add_field(name="◆ SOURCE DES COTES", value="**Bet365 via 5Dollar**\nContrôle de la cote au moment de la validation.", inline=False)
         e.set_footer(text=_footer("Sportsbook • choisis SIMPLE ou COMBINÉ"))
-        await interaction.response.send_message(embed=e, view=BetModeView(self.service, active), ephemeral=True)
+        await open_private_page(interaction, embed=e, view=BetModeView(self.service, active))
 
     @discord.ui.button(label="Mes paris", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
     async def mybets(self, interaction, button):
-        await interaction.response.send_message(embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service), ephemeral=True)
+        await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service))
 
     @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
     async def live(self, interaction, button):
-        await interaction.response.send_message(embed=await _live_embed(self.service), view=LivePanelView(self.service), ephemeral=True)
+        await open_private_page(interaction, embed=await _live_embed(self.service), view=LivePanelView(self.service))
 
     @discord.ui.button(label="Classement", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
     async def rank(self, interaction, button):
         e = await _leaderboard_embed(self.service, interaction.client)
-        await interaction.response.send_message(embed=e, view=RankProfileView(self.service), ephemeral=True)
+        await open_private_page(interaction, embed=e, view=RankProfileView(self.service))
 
 # --- Premium betting flow ---------------------------------------------------
 
