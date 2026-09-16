@@ -7,7 +7,7 @@ import discord
 
 from ..betting.service import BettingService
 from ..core.constants import COMPETITIONS
-from ..discord_ui.ui import MainPanelView, LivePanelView, build_title_embed, carousel_keys, CAROUSEL_ASSETS
+from ..discord_ui.ui import MainPanelView, LivePanelView, build_title_embed, carousel_keys, CAROUSEL_ASSETS, _live_embed
 
 ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
 
@@ -120,59 +120,8 @@ class PanelManager:
         return raw
 
     async def build_live_embed(self) -> discord.Embed:
-        """Compact Live Center, grouped and driven by confirmed 5Dollar state."""
-        rows = await self.service.live_matches(25)
-        embed = discord.Embed(
-            title="🔴  ODDIUM • LIVE CENTER",
-            description=("**Scores en direct • état 5Dollar • actualisation automatique**" if rows else
-                         "### Aucun match en direct\nLe Live Center s'activera automatiquement au prochain coup d'envoi."),
-            color=0xED4245,
-        )
-        if not rows:
-            embed.set_footer(text="ODDIUM LIVE • surveillance automatique")
-            return embed
-
-        labels = {
-            "kickoff_wait": "🟠 DÉMARRAGE", "first_half": "🔴 DIRECT", "live": "🔴 DIRECT",
-            "halftime": "⏸️ MI-TEMPS", "second_half": "🔴 DIRECT", "extra_time": "⏱️ PROLONG.",
-            "penalties": "🎯 T.A.B.", "suspended": "⏸️ SUSPENDU", "finished": "✅ TERMINÉ",
-            "postponed": "📅 REPORTÉ", "cancelled": "❌ ANNULÉ",
-        }
-        groups = {}
-        for m in rows:
-            comp = COMPETITIONS.get(m["sport_key"], {})
-            key = (comp.get("emoji", "⚽"), comp.get("name", m["competition_name"]))
-            groups.setdefault(key, []).append(m)
-
-        shown = 0
-        for (emoji, league), games in list(groups.items())[:6]:
-            lines = []
-            for m in games:
-                if shown >= 12:
-                    break
-                hs = "–" if m["home_score"] is None else str(m["home_score"])
-                aws = "–" if m["away_score"] is None else str(m["away_score"])
-                phase = str(m["live_phase"] or m["match_status"] or "live").lower()
-                status = labels.get(phase, "🔴 DIRECT")
-                clock = self._display_clock(m, phase)
-                if clock:
-                    status += f"  •  {clock}"
-                lines.append(
-                    f"{status}\n"
-                    f"**{m['home_team']}**   ` {hs}  —  {aws} `   **{m['away_team']}**"
-                )
-                shown += 1
-            if lines:
-                embed.add_field(name=f"{emoji}  {str(league).upper()}", value="\n\n".join(lines)[:1024], inline=False)
-            if shown >= 12:
-                break
-
-        hidden = max(0, len(rows) - shown)
-        footer = f"{len(rows)} match(s) live • 📊 Détails • 🔔 Suivre • 🎟️ Mes paris live"
-        if hidden:
-            footer += f" • +{hidden} masqué(s)"
-        embed.set_footer(text=footer)
-        return embed
+        """Build the single canonical Oddium live presentation."""
+        return await _live_embed(self.service)
 
     async def _find_existing_live_panel(self, channel: discord.TextChannel):
         """Find an existing Oddium live board when DB state was lost after a redeploy."""
