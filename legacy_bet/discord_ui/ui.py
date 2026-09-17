@@ -1146,6 +1146,58 @@ class LivePanelView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=discord.Embed(title="🎟️ MES PARIS LIVE", description="\n\n".join(lines), color=ODDIUM_GREEN), view=HomeReturnView(self.service), attachments=[])
 
 
+async def _balance_embed(service: BettingService, user: discord.abc.User) -> discord.Embed:
+    """Solde Gold partagé, lu en temps réel depuis Altherya."""
+    try:
+        balance = await service.economy.get_balance(user.id)
+    except Exception:
+        e = discord.Embed(
+            title="💰  ODDIUM • MON SOLDE",
+            description=(
+                "### GOLD PARTAGÉ AVEC ALTHERYA\n"
+                f"{ODDIUM_DIVIDER}\n"
+                "⚠️ **Solde momentanément indisponible.**\n"
+                "Oddium ne bascule pas sur un portefeuille local : réessaie dans quelques instants."
+            ),
+            color=ODDIUM_RED,
+        )
+        e.set_thumbnail(url=user.display_avatar.url)
+        e.set_footer(text=_footer("Économie Altherya • connexion requise"))
+        return e
+
+    e = discord.Embed(
+        title="💰  ODDIUM • MON SOLDE",
+        description=(
+            "### GOLD PARTAGÉ AVEC ALTHERYA\n"
+            f"{ODDIUM_DIVIDER}\n"
+            f"## **{fmt_num(balance)} {SETTINGS.currency_name}**\n"
+            "Ce solde est récupéré **en temps réel depuis Altherya** et sert directement à tes mises Oddium."
+        ),
+        color=ODDIUM_GOLD,
+    )
+    e.set_thumbnail(url=user.display_avatar.url)
+    e.add_field(name="🔗 PORTEFEUILLE", value="**Altherya ↔ Oddium**\nUn seul solde Gold", inline=True)
+    e.add_field(name="🎟️ UTILISATION", value="Mises • gains • remboursements", inline=True)
+    e.set_footer(text=_footer("Solde actualisé à l'ouverture"))
+    return e
+
+
+class BalanceView(discord.ui.View):
+    def __init__(self, service: BettingService):
+        super().__init__(timeout=300)
+        self.service = service
+
+    @discord.ui.button(label="Actualiser", emoji="🔄", style=discord.ButtonStyle.primary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await interaction.edit_original_response(embed=await _balance_embed(self.service, interaction.user), view=self, attachments=[])
+
+    @discord.ui.button(label="Retour à l'accueil", emoji="🏠", style=discord.ButtonStyle.secondary)
+    async def home(self, interaction: discord.Interaction, button: discord.ui.Button):
+        active = carousel_keys(await self.service.active_competitions())
+        await interaction.response.edit_message(embed=await build_title_embed(self.service), view=QuickHomeView(self.service, active), attachments=[])
+
+
 class MainPanelView(discord.ui.View):
     """Cinq accès maximum, aucune action redondante."""
     def __init__(self, service: BettingService, active: list[str]):
@@ -1185,6 +1237,16 @@ class MainPanelView(discord.ui.View):
     async def mybets(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
         await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service), replace_existing=True)
+
+    @discord.ui.button(label="Solde", emoji="💰", style=discord.ButtonStyle.secondary, custom_id="oddium:v56:balance", row=1)
+    async def balance(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await open_private_page(
+            interaction,
+            embed=await _balance_embed(self.service, interaction.user),
+            view=BalanceView(self.service),
+            replace_existing=True,
+        )
 
     @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
     async def live(self, interaction, button):
