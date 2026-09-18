@@ -42,7 +42,11 @@ def carousel_keys(active: list[str]) -> list[str]:
         "soccer_italy_serie_a",
         "soccer_uefa_champs_league",
         "soccer_uefa_europa_league",
+        "soccer_uefa_nations_league",
     ]
+    # Nations League is part of Oddium's permanent catalogue from V68.
+    if "soccer_uefa_nations_league" not in active:
+        active = list(active) + ["soccer_uefa_nations_league"]
     return [k for k in preferred if k in active and k in COMPETITIONS]
 
 
@@ -456,6 +460,55 @@ class LeagueGridButton(discord.ui.Button):
 # Un vrai écran Discord : date -> matchs -> boutons 1/N/2 placés juste sous
 # chaque affiche. Aucun menu déroulant n'est utilisé dans ce parcours.
 
+# V68 • ticket universel : 1 sélection = simple, 2+ = combiné.
+# Brouillon volontairement en mémoire : aucune mise n'est débitée avant validation.
+UNIVERSAL_TICKETS: dict[int, dict[str, dict]] = {}
+
+def _draft_for(user_id: int) -> dict[str, dict]:
+    return UNIVERSAL_TICKETS.setdefault(int(user_id), {})
+
+def _draft_total(draft: dict[str, dict]) -> float:
+    total = 1.0
+    for leg in draft.values(): total *= float(leg["odd"])
+    return total
+
+class UniversalStakeModal(discord.ui.Modal, title="🎟️ Valider mon ticket"):
+    stake = discord.ui.TextInput(label=f"Mise en {SETTINGS.currency_name}", placeholder="Exemple : 500", min_length=1, max_length=12)
+    def __init__(self, service): super().__init__(timeout=180); self.service=service
+    async def on_submit(self, interaction):
+        raw=str(self.stake.value).replace(" ","").replace(",","")
+        if not raw.isdigit(): return await interaction.response.send_message("❌ Mise invalide.",ephemeral=True)
+        draft=dict(_draft_for(interaction.user.id))
+        if not draft: return await interaction.response.send_message("Ton ticket est vide.",ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        legs=list(draft.values()); stake=int(raw)
+        if len(legs)==1:
+            x=legs[0]; ok,reason,data=await self.service.place_bet(interaction.user.id,x["event_id"],x["selection"],stake,x["odd"])
+            label="PARI SIMPLE"
+        else:
+            ok,reason,data=await self.service.place_combo_bet(interaction.user.id,legs,stake); label=f"COMBINÉ ×{len(legs)}"
+        if not ok:
+            if reason=="ODD_CHANGED": reason="Une cote a changé. Reclique sur la sélection pour actualiser ton ticket."
+            return await interaction.followup.send(f"❌ {reason}",ephemeral=True)
+        UNIVERSAL_TICKETS.pop(int(interaction.user.id),None)
+        payout=data.get("payout",0)
+        await interaction.followup.send(f"✅ **{label} VALIDÉ**\n💰 Mise **{fmt_num(stake)} {SETTINGS.currency_name}**\n🏆 Gain potentiel **{fmt_num(payout)} {SETTINGS.currency_name}**",ephemeral=True)
+
+class UniversalValidateButton(discord.ui.Button):
+    def __init__(self, service): super().__init__(label="Valider mon ticket",emoji="✅",style=discord.ButtonStyle.success); self.service=service
+    async def callback(self,interaction):
+        if not _draft_for(interaction.user.id): return await interaction.response.send_message("Ton ticket est vide.",ephemeral=True)
+        await interaction.response.send_modal(UniversalStakeModal(self.service))
+
+class UniversalClearButton(discord.ui.Button):
+    def __init__(self): super().__init__(label="Vider",emoji="🗑️",style=discord.ButtonStyle.danger)
+    async def callback(self,interaction):
+        UNIVERSAL_TICKETS.pop(int(interaction.user.id),None)
+        view=self.view
+        if isinstance(view,MatchBoardV2):
+            view.viewer_id=int(interaction.user.id); view.rebuild()
+        await interaction.response.edit_message(view=view)
+
 class MatchOddV2Button(discord.ui.Button):
     def __init__(self, service: BettingService, match, selection: str, label: str, odd: float):
         style = discord.ButtonStyle.success if selection == "HOME" else (discord.ButtonStyle.secondary if selection == "DRAW" else discord.ButtonStyle.primary)
@@ -473,7 +526,15 @@ class MatchOddV2Button(discord.ui.Button):
             return await interaction.response.send_message("Ce match n'est plus disponible.", ephemeral=True)
         if datetime.now(timezone.utc) >= parse_iso(match["commence_time"]):
             return await interaction.response.send_message("🔒 Les paris pré-match sont fermés pour cette rencontre.", ephemeral=True)
-        await interaction.response.send_modal(StakeModal(self.service, self.event_id, self.selection, self.odd))
+        draft=_draft_for(interaction.user.id)
+        # Une autre cote du même match remplace automatiquement l'ancienne.
+        draft[self.event_id]={"event_id":self.event_id,"selection":self.selection,"odd":self.odd,
+                              "home_team":str(match["home_team"]),"away_team":str(match["away_team"])}
+        view=self.view
+        if isinstance(view,MatchBoardV2):
+            view.viewer_id=int(interaction.user.id)
+            view.rebuild()
+        await interaction.response.edit_message(view=view)
 
 
 class MatchBoardDateButton(discord.ui.Button):
@@ -639,6 +700,17 @@ class MatchBoardV2(discord.ui.LayoutView):
             pages.add_item(MatchBoardPageButton(1, self.page >= self.page_count - 1))
             box.add_item(pages)
 
+        draft = _draft_for(getattr(self, "viewer_id", 0)) if getattr(self, "viewer_id", 0) else {}
+        # viewer_id is assigned on the first odds click; fallback summary is added by interaction rebuild.
+        if draft:
+            box.add_item(discord.ui.Separator())
+            kind = "PARI SIMPLE" if len(draft)==1 else f"COMBINÉ ×{len(draft)}"
+            lines=[]
+            for leg in draft.values():
+                pick={"HOME":leg["home_team"],"DRAW":"Nul","AWAY":leg["away_team"]}[leg["selection"]]
+                lines.append(f"• **{leg['home_team']} — {leg['away_team']}** → {pick} `@{leg['odd']:.2f}`")
+            box.add_item(discord.ui.TextDisplay(f"## 🎟️ MON TICKET • {kind}\n"+"\n".join(lines)+f"\n**Cote totale : {_draft_total(draft):.2f}**"))
+            actions=discord.ui.ActionRow(); actions.add_item(UniversalValidateButton(self.service)); actions.add_item(UniversalClearButton()); box.add_item(actions)
         nav = discord.ui.ActionRow()
         nav.add_item(MatchBoardLeaguesButton())
         box.add_item(nav)
@@ -1020,11 +1092,6 @@ class QuickHomeView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         embed=await build_carousel_embed(self.service,self.active,0)
         await interaction.edit_original_response(embed=await league_hub_embed(self.service,self.active,"browse"),view=LeagueGridView(self.service,self.active,"browse"),attachments=[])
-    @discord.ui.button(label="Combiné",emoji="🧩",style=discord.ButtonStyle.secondary)
-    async def bet(self,interaction,button):
-        e=discord.Embed(title="🎟️ CHOISIS TON STYLE DE JEU",description="🎯 **Pari simple** — un pronostic 1/N/2\n🧩 **Pari combiné** — plusieurs matchs, une cote totale",color=discord.Color.gold())
-        await interaction.response.edit_message(embed=e,view=BetModeView(self.service,self.active),attachments=[])
-
 
 
 
@@ -1404,14 +1471,14 @@ class LivePanelView(discord.ui.View):
 
     @discord.ui.button(label="Détails", style=discord.ButtonStyle.primary, emoji="📊", custom_id="oddium:v13:live:details", row=0)
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
-        matches = await self.service.live_matches(25)
+        matches = [m for m in await self.service.live_matches(25) if str(m["event_id"]) in await self.service.bet_event_ids()]
         if not matches:
             return await interaction.response.send_message("⚽ Aucun match live actuellement.", ephemeral=True)
         await interaction.response.edit_message(content="**Choisis un match pour ouvrir sa fiche :**", embed=None, view=LiveDetailsSelectView(self.service, matches), attachments=[])
 
     @discord.ui.button(label="Suivre", style=discord.ButtonStyle.danger, emoji="🔔", custom_id="oddium:v13:live:follow", row=0)
     async def follow(self, interaction: discord.Interaction, button: discord.ui.Button):
-        matches = await self.service.live_matches(25)
+        matches = [m for m in await self.service.live_matches(25) if str(m["event_id"]) in await self.service.bet_event_ids()]
         if not matches:
             return await interaction.response.send_message("⚽ Aucun match live à suivre.", ephemeral=True)
         followed = await self.service.followed_event_ids(interaction.user.id)
@@ -1565,20 +1632,13 @@ class BalanceView(discord.ui.View):
         active = carousel_keys(await self.service.active_competitions())
         if not active:
             return await interaction.response.send_message("⚽ Aucun championnat actif pour le moment.", ephemeral=True)
-        e = discord.Embed(
-            title="🎟️  ODDIUM • SPORTSBOOK",
-            description="### À TOI DE JOUER\n**Simple ou combiné : choisis ton terrain.**\n" + ODDIUM_DIVIDER,
-            color=ODDIUM_GOLD,
-        )
-        e.add_field(name="🎯 DUEL SIMPLE", value="Un match • une sélection • une cote", inline=True)
-        e.add_field(name="🧩 COMBINÉ", value="Plusieurs matchs • une cote cumulée", inline=True)
-        await interaction.response.edit_message(embed=e, view=BetModeView(self.service, active), attachments=[])
+        await interaction.response.edit_message(embed=None, content=None, view=LeagueHubV2(self.service, active), attachments=[])
 
     @discord.ui.button(label="Mes tickets", emoji="📜", style=discord.ButtonStyle.primary, row=0)
     async def my_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
             embed=await _my_bets_embed(self.service, interaction.user.id),
-            view=HomeReturnView(self.service),
+            view=TicketsView(self.service,[x for x in await self.service.user_combo_bets(interaction.user.id,30) if str(x[0]["status"])=="PENDING"]),
             attachments=[],
         )
 
@@ -1613,28 +1673,6 @@ class MainPanelView(discord.ui.View):
         if not active:
             return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
         await open_private_page(interaction, embed=None, view=LeagueHubV2(self.service, active), replace_existing=True)
-
-    @discord.ui.button(label="Combiné", emoji="🧩", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:bet", row=0)
-    async def bet(self, interaction, button):
-        # Acknowledge the permanent-panel click before DB/provider work.
-        # Without this, a cold request can make Discord show a dead button.
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        active = carousel_keys(await self.service.active_competitions())
-        if not active:
-            return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
-        e = discord.Embed(
-            title="✦ ODDIUM • ARÈNE DES PARIS",
-            description=(
-                _bookmaker_header("BET DESK", "Compose ton ticket comme sur un vrai bookmaker.")
-                + "\n\n`SIMPLE`  1 sélection • cote fixe à validation"
-                + "\n`COMBINÉ` plusieurs sélections • cote cumulée"
-                + "\n\n**Marché principal**　`1` Domicile　`N` Nul　`2` Extérieur"
-            ),
-            color=ODDIUM_GOLD,
-        )
-        e.add_field(name="◆ SOURCE DES COTES", value="**Bet365 via 5Dollar**\nContrôle de la cote au moment de la validation.", inline=False)
-        e.set_footer(text=_footer("Sportsbook • choisis SIMPLE ou COMBINÉ"))
-        await open_private_page(interaction, embed=e, view=BetModeView(self.service, active), replace_existing=True)
 
     @discord.ui.button(label="Mes tickets", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
     async def mybets(self, interaction, button):
@@ -2084,6 +2122,8 @@ async def build_league_embed(service: BettingService, sport_key: str, matches) -
 
 async def _live_embed(service):
     rows = await service.live_matches(25)
+    bet_events = await service.bet_event_ids()
+    rows = [m for m in rows if str(m["event_id"]) in bet_events]
     e = discord.Embed(
         title="🔴  ODDIUM • LIVE ARENA",
         description=(

@@ -1127,6 +1127,12 @@ class BettingService:
         return await self.db.fetchall("SELECT user_id FROM match_follows WHERE event_id=?", (event_id,))
 
 
+    async def bet_event_ids(self) -> set[str]:
+        """Matchs ayant au moins un pari réellement validé, simple ou combiné."""
+        rows = await self.db.fetchall("""SELECT DISTINCT event_id FROM bets WHERE status IN ('PENDING','WON','LOST','VOID')
+                                      UNION SELECT DISTINCT event_id FROM combo_legs""")
+        return {str(r["event_id"]) for r in rows}
+
     async def user_live_bets(self, user_id: int, limit: int = 10):
         return await self.db.fetchall(
             """SELECT b.*,m.home_team,m.away_team,m.home_score,m.away_score,m.live_phase,m.live_clock
