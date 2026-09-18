@@ -48,6 +48,7 @@ class FiveDollarClient:
         "soccer_uefa_champs_league": FiveDollarLeague((2187079931, 1318331555), "UEFA Champions League", "EUROPE", ("Champions League", "UEFA CL")),
         # No hard-coded bootstrap id: resolve the account-specific 5Dollar id from /leagues.
         "soccer_uefa_europa_league": FiveDollarLeague((), "UEFA Europa League", "EUROPE", ("Europa League", "UEFA EL", "UEL")),
+        "soccer_uefa_nations_league": FiveDollarLeague((), "UEFA Nations League", "EUROPE", ("Nations League", "UEFA Nations League", "UNL")),
     }
 
     def __init__(self, session_getter):

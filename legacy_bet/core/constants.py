@@ -6,6 +6,7 @@ COMPETITIONS = {
     "soccer_italy_serie_a": {"name": "Serie A", "emoji": "🇮🇹", "league": "SA"},
     "soccer_uefa_champs_league": {"name": "Ligue des Champions", "emoji": "🏆", "league": "CL"},
     "soccer_uefa_europa_league": {"name": "Ligue Europa", "emoji": "🟠", "league": "UEL"},
+    "soccer_uefa_nations_league": {"name": "Ligue des Nations", "emoji": "🌍", "league": "UNL"},
 }
 
 DEFAULT_ACTIVE_COMPETITIONS = [
@@ -16,7 +17,8 @@ DEFAULT_ACTIVE_COMPETITIONS = [
     "soccer_italy_serie_a",
     "soccer_uefa_champs_league",
     "soccer_uefa_europa_league",
+    "soccer_uefa_nations_league",
 ]
 
 SELECTION_LABELS = {"HOME": "1", "DRAW": "N", "AWAY": "2"}
-BET_STATUS_ICONS = {"PENDING": "🟠", "WON": "🟢", "LOST": "🔴", "VOID": "⚪"}
+BET_STATUS_ICONS = {"PENDING": "", "WON": "✅", "LOST": "❌", "VOID": "⚪"}

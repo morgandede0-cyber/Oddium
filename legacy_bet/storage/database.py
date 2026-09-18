@@ -272,6 +272,16 @@ class Database:
             ]
             if current == previous_default:
                 await self.set_setting("active_competitions", DEFAULT_ACTIVE_COMPETITIONS)
+            else:
+                # V67: installations using the former seven-competition default
+                # automatically gain UEFA Nations League. Custom selections stay untouched.
+                previous_seven = [
+                    "soccer_france_ligue_one", "soccer_epl", "soccer_spain_la_liga",
+                    "soccer_germany_bundesliga", "soccer_italy_serie_a",
+                    "soccer_uefa_champs_league", "soccer_uefa_europa_league",
+                ]
+                if current == previous_seven:
+                    await self.set_setting("active_competitions", DEFAULT_ACTIVE_COMPETITIONS)
 
     async def _ensure_column(self, db: aiosqlite.Connection, table: str, column: str, definition: str) -> None:
         cur = await db.execute(f"PRAGMA table_info({table})")

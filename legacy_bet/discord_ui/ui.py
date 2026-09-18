@@ -1014,13 +1014,13 @@ class QuickHomeView(discord.ui.View):
     """Navigation privée cohérente après avoir ouvert un sous-écran."""
     def __init__(self, service, active):
         super().__init__(timeout=300); self.service=service; self.active=active
-    @discord.ui.button(label="Voir les matchs",emoji="⚽",style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Paris",emoji="⚽",style=discord.ButtonStyle.success)
     async def matches(self,interaction,button):
         if not self.active:return await interaction.response.send_message("Aucun championnat actif.",ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=False)
         embed=await build_carousel_embed(self.service,self.active,0)
         await interaction.edit_original_response(embed=await league_hub_embed(self.service,self.active,"browse"),view=LeagueGridView(self.service,self.active,"browse"),attachments=[])
-    @discord.ui.button(label="Parier",emoji="🎟️",style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Combiné",emoji="🧩",style=discord.ButtonStyle.secondary)
     async def bet(self,interaction,button):
         e=discord.Embed(title="🎟️ CHOISIS TON STYLE DE JEU",description="🎯 **Pari simple** — un pronostic 1/N/2\n🧩 **Pari combiné** — plusieurs matchs, une cote totale",color=discord.Color.gold())
         await interaction.response.edit_message(embed=e,view=BetModeView(self.service,self.active),attachments=[])
@@ -1171,43 +1171,91 @@ class BrowseMatchSelect(discord.ui.Select):
         await interaction.response.edit_message(content=None, embed=e, view=HomeReturnView(self.service), attachments=[])
 
 
+def _ticket_match_icon(row) -> str:
+    """Convention joueur V67: gagné ✅, live 🔴, perdu ❌, futur sans icône."""
+    status = str(row["status"] or "PENDING").upper()
+    if status == "WON": return "✅"
+    if status == "LOST": return "❌"
+    if status == "VOID": return "⚪"
+    phase = str(row["live_phase"] or row["match_status"] or "pending").lower() if "live_phase" in row.keys() else "pending"
+    if phase in {"kickoff_wait","first_half","live","second_half","halftime","extra_time","penalties","suspended"}:
+        return "🔴"
+    return ""
+
 async def _my_bets_embed(service, user_id):
-    # Opening Mes tickets also repairs stale PENDING results immediately.
-    try:
-        await service.reconcile_open_tickets()
-    except Exception:
-        pass
-    simple = await service.user_bets(user_id, None, 20)
-    combos = await service.user_combo_bets(user_id, 10)
-    pending_count = sum(1 for b in simple if str(b["status"]) == "PENDING") + sum(1 for c, _ in combos if str(c["status"]) == "PENDING")
-    e = discord.Embed(
-        title="🎟️  ODDIUM • MES TICKETS",
-        description=f"### PORTEFEUILLE DE PARIS\n`{pending_count:02d}` **EN COURS**　•　🟢 GAGNÉ　•　🔴 PERDU　•　⚪ REMBOURSÉ\n{ODDIUM_DIVIDER}",
-        color=ODDIUM_BLUE,
-    )
+    try: await service.reconcile_open_tickets()
+    except Exception: pass
+    simple = [b for b in await service.user_bets(user_id, "PENDING", 30)]
+    combos = [(c, legs) for c, legs in await service.user_combo_bets(user_id, 30) if str(c["status"]) == "PENDING"]
+    e = discord.Embed(title="🎟️  ODDIUM • MES TICKETS", description=(
+        f"### TICKETS ACTIFS\n**{len(simple)+len(combos)}** ticket(s) encore à jouer ou en cours\n{ODDIUM_DIVIDER}\n"
+        "✅ validé　•　🔴 en cours　•　❌ perdu　•　aucun symbole = pas commencé"), color=ODDIUM_BLUE)
     if simple:
-        lines = []
-        for b in simple[:6]:
-            icon = BET_STATUS_ICONS.get(b["status"], "⚪")
-            sel = {"HOME": "1", "DRAW": "N", "AWAY": "2"}.get(b["selection"], b["selection"])
-            lines.append(
-                f"{icon} **BET-{b['id']}**  ·  {b['home_team']} — {b['away_team']}\n"
-                f"　`{sel} @ {_safe_odd(b['odd'])}`  •  mise **{fmt_num(b['stake'])}**  •  retour **{fmt_num(b['potential_payout'])} {SETTINGS.currency_name}**"
-            )
-        e.add_field(name="SIMPLES", value="\n\n".join(lines)[:1024], inline=False)
+        lines=[]
+        for b in simple[:8]:
+            icon=_ticket_match_icon(b); sel={"HOME":"1","DRAW":"N","AWAY":"2"}.get(b["selection"],b["selection"])
+            lines.append(f"{icon+' ' if icon else ''}**{b['home_team']} — {b['away_team']}**\n　`{sel} @ {_safe_odd(b['odd'])}` • mise **{fmt_num(b['stake'])}**")
+        e.add_field(name="PARIS SIMPLES",value="\n\n".join(lines)[:1024],inline=False)
     if combos:
-        lines = []
-        for c, legs in combos[:4]:
-            icon = {"PENDING": "🟡", "WON": "🟢", "LOST": "🔴", "VOID": "⚪"}.get(str(c["status"]), "⚪")
-            lines.append(
-                f"{icon} **COMBO-{c['id']}**  ·  {len(legs)} sélections  ·  cote **{float(c['total_odd']):.2f}**\n"
-                f"　Mise **{fmt_num(c['stake'])}**  •  retour **{fmt_num(c['potential_payout'])} {SETTINGS.currency_name}**"
-            )
-        e.add_field(name="COMBINÉS", value="\n\n".join(lines)[:1024], inline=False)
+        lines=[]
+        for c,legs in combos[:6]:
+            won=sum(str(x["status"])=="WON" for x in legs); live=sum(_ticket_match_icon(x)=="🔴" for x in legs)
+            state=f"{won}/{len(legs)} validé(s)" + (f" • 🔴 {live} en cours" if live else "")
+            lines.append(f"🧩 **COMBO-{c['id']}** • {len(legs)} matchs • cote **{float(c['total_odd']):.2f}**\n　{state} • mise **{fmt_num(c['stake'])}**")
+        e.add_field(name="COMBINÉS — ouvre le détail avec les boutons",value="\n\n".join(lines)[:1024],inline=False)
     if not simple and not combos:
-        e.description = "### Aucun ticket pour le moment\nCrée ton premier pari depuis l'accueil."
-    e.set_footer(text=_footer("Cotes verrouillées à la validation"))
+        e.description = f"### AUCUN TICKET ACTIF\nTous tes paris sont réglés.\n{ODDIUM_DIVIDER}\nRetrouve-les dans **📜 Historique**."
+    e.set_footer(text=_footer("Seuls les tickets non terminés apparaissent ici")); return e
+
+async def _history_embed(service,user_id):
+    simple=[b for b in await service.user_bets(user_id,None,40) if str(b["status"])!="PENDING"]
+    combos=[(c,l) for c,l in await service.user_combo_bets(user_id,30) if str(c["status"])!="PENDING"]
+    e=discord.Embed(title="📜 ODDIUM • HISTORIQUE",description=f"### ARCHIVES DES PARIS\nTickets déjà terminés\n{ODDIUM_DIVIDER}",color=ODDIUM_DARK)
+    lines=[]
+    for b in simple[:10]:
+        icon=_ticket_match_icon(b); sel={"HOME":"1","DRAW":"N","AWAY":"2"}.get(b["selection"],b["selection"])
+        lines.append(f"{icon} **{b['home_team']} — {b['away_team']}** • `{sel} @{_safe_odd(b['odd'])}` • **{fmt_num(b['stake'])}**")
+    for c,legs in combos[:8]:
+        icon="✅" if str(c["status"])=="WON" else ("❌" if str(c["status"])=="LOST" else "⚪")
+        lines.append(f"{icon} **COMBO-{c['id']}** • {len(legs)} matchs • cote **{float(c['total_odd']):.2f}** • **{fmt_num(c['stake'])}**")
+    e.description += "\n\n"+("\n".join(lines) if lines else "Aucun pari terminé pour le moment.")
     return e
+
+async def _combo_detail_embed(service,user_id,combo_id):
+    combos=await service.user_combo_bets(user_id,50)
+    found=next(((c,l) for c,l in combos if int(c["id"])==int(combo_id)),None)
+    if not found: return discord.Embed(title="Ticket introuvable",color=ODDIUM_RED)
+    c,legs=found
+    lines=[]
+    for leg in legs:
+        icon=_ticket_match_icon(leg); sel={"HOME":leg["home_team"],"DRAW":"Match nul","AWAY":leg["away_team"]}.get(leg["selection"],leg["selection"])
+        score=""
+        if leg["home_score"] is not None or leg["away_score"] is not None: score=f" • `{leg['home_score'] if leg['home_score'] is not None else '-'}-{leg['away_score'] if leg['away_score'] is not None else '-'}`"
+        lines.append(f"{icon+' ' if icon else ''}**{leg['home_team']} — {leg['away_team']}**{score}\n　{sel} • `@{_safe_odd(leg['odd'])}`")
+    status={"WON":"✅ GAGNÉ","LOST":"❌ PERDU","VOID":"⚪ REMBOURSÉ","PENDING":"🎟️ EN COURS"}.get(str(c["status"]),str(c["status"]))
+    e=discord.Embed(title=f"🧩 ODDIUM • COMBO-{c['id']}",description=f"### {status}\nMise **{fmt_num(c['stake'])}** • cote **{float(c['total_odd']):.2f}** • gain potentiel **{fmt_num(c['potential_payout'])} {SETTINGS.currency_name}**\n{ODDIUM_DIVIDER}\n\n"+"\n\n".join(lines),color=ODDIUM_GOLD)
+    return e
+
+class ComboDetailButton(discord.ui.Button):
+    def __init__(self,service,combo_id,row=0): super().__init__(label=f"Combo {combo_id}",emoji="🧩",style=discord.ButtonStyle.primary,row=row); self.service=service; self.combo_id=combo_id
+    async def callback(self,interaction): await interaction.response.edit_message(embed=await _combo_detail_embed(self.service,interaction.user.id,self.combo_id),view=TicketsBackView(self.service))
+
+class TicketsView(discord.ui.View):
+    def __init__(self,service,combos):
+        super().__init__(timeout=300); self.service=service
+        for i,(c,_) in enumerate(combos[:4]): self.add_item(ComboDetailButton(service,int(c["id"]),0))
+    @discord.ui.button(label="Historique",emoji="📜",style=discord.ButtonStyle.secondary,row=1)
+    async def history(self,interaction,button): await interaction.response.edit_message(embed=await _history_embed(self.service,interaction.user.id),view=TicketsBackView(self.service))
+    @discord.ui.button(label="Accueil",emoji="🏠",style=discord.ButtonStyle.secondary,row=1)
+    async def home(self,interaction,button):
+        active=carousel_keys(await self.service.active_competitions()); await interaction.response.edit_message(embed=await build_title_embed(self.service),view=QuickHomeView(self.service,active))
+
+class TicketsBackView(discord.ui.View):
+    def __init__(self,service): super().__init__(timeout=300); self.service=service
+    @discord.ui.button(label="Mes tickets",emoji="🎟️",style=discord.ButtonStyle.primary)
+    async def back(self,interaction,button):
+        combos=[x for x in await self.service.user_combo_bets(interaction.user.id,30) if str(x[0]["status"])=="PENDING"]
+        await interaction.response.edit_message(embed=await _my_bets_embed(self.service,interaction.user.id),view=TicketsView(self.service,combos))
 
 
 async def _profile_embed(service, user):
@@ -1241,7 +1289,16 @@ async def _leaderboard_embed(service, bot):
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for i, r in enumerate(rows, 1):
-        u = bot.get_user(int(r["user_id"])); name = u.display_name if u else f"Joueur {r['user_id']}"
+        uid = int(r["user_id"])
+        u = bot.get_user(uid)
+        if u is None:
+            for guild in bot.guilds:
+                u = guild.get_member(uid)
+                if u is not None: break
+        if u is None:
+            try: u = await bot.fetch_user(uid)
+            except Exception: u = None
+        name = u.display_name if u else "Joueur inconnu"
         rate = (int(r["wins"]) / int(r["settled"]) * 100) if int(r["settled"]) else 0
         rank = medals[i - 1] if i <= 3 else f"`#{i:02d}`"
         lines.append(f"{rank} **{name}**\n　**{int(r['net']):+,} {SETTINGS.currency_name}**  •  {rate:.0f}% réussite".replace(',', ' '))
@@ -1503,7 +1560,7 @@ class BalanceView(discord.ui.View):
         super().__init__(timeout=300)
         self.service = service
 
-    @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="Paris", emoji="⚽", style=discord.ButtonStyle.success, row=0)
     async def bet(self, interaction: discord.Interaction, button: discord.ui.Button):
         active = carousel_keys(await self.service.active_competitions())
         if not active:
@@ -1549,15 +1606,15 @@ class MainPanelView(discord.ui.View):
     def __init__(self, service: BettingService, active: list[str]):
         super().__init__(timeout=None); self.service = service; self.active = [k for k in active if k in COMPETITIONS]
 
-    @discord.ui.button(label="Matchs", emoji="⚽", style=discord.ButtonStyle.primary, custom_id="oddium:v13:matches", row=0)
+    @discord.ui.button(label="Paris", emoji="⚽", style=discord.ButtonStyle.success, custom_id="oddium:v13:matches", row=0)
     async def matches(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
         active = carousel_keys(await self.service.active_competitions())
         if not active:
             return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
-        await open_private_page(interaction, embed=await league_hub_embed(self.service, active, "browse"), view=LeagueGridView(self.service, active, "browse"), replace_existing=True)
+        await open_private_page(interaction, embed=None, view=LeagueHubV2(self.service, active), replace_existing=True)
 
-    @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
+    @discord.ui.button(label="Combiné", emoji="🧩", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
         # Acknowledge the permanent-panel click before DB/provider work.
         # Without this, a cold request can make Discord show a dead button.
@@ -1582,7 +1639,8 @@ class MainPanelView(discord.ui.View):
     @discord.ui.button(label="Mes tickets", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
     async def mybets(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
-        await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service), replace_existing=True)
+        combos=[x for x in await self.service.user_combo_bets(interaction.user.id,30) if str(x[0]["status"])=="PENDING"]
+        await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=TicketsView(self.service,combos), replace_existing=True)
 
     @discord.ui.button(label="Coffre", emoji="💰", style=discord.ButtonStyle.secondary, custom_id="oddium:v56:balance", row=1)
     async def balance(self, interaction, button):

@@ -1458,7 +1458,7 @@ class BettingService:
         out=[]
         for c in combos:
             legs = await self.db.fetchall(
-                """SELECT l.*,m.home_team,m.away_team,m.commence_time FROM combo_legs l JOIN matches m ON m.event_id=l.event_id WHERE l.combo_id=? ORDER BY m.commence_time""",
+                """SELECT l.*,m.home_team,m.away_team,m.commence_time,m.completed,m.cancelled,m.match_status,m.live_phase,m.live_clock,m.home_score,m.away_score FROM combo_legs l JOIN matches m ON m.event_id=l.event_id WHERE l.combo_id=? ORDER BY m.commence_time""",
                 (int(c["id"]),),
             )
             out.append((c, legs))
