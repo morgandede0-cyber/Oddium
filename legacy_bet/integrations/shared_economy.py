@@ -35,7 +35,11 @@ class SharedEconomyClient:
     def _balance(self,uid):
         with self._connect() as c:
             self._schema(c); c.execute('INSERT INTO economy_wallets(user_id,balance) VALUES(%s,0) ON CONFLICT DO NOTHING',(uid,)); r=c.execute('SELECT balance FROM economy_wallets WHERE user_id=%s',(uid,)).fetchone(); c.commit(); return int(r[0])
-    async def get_balance(self,user_id:int): return await asyncio.to_thread(self._balance,int(user_id))
+    async def get_balance(self,user_id:int):
+        uid=int(user_id)
+        balance=await asyncio.to_thread(self._balance,uid)
+        log.info('[WALLET] lecture PostgreSQL • user_id=%s • balance=%s', uid, balance)
+        return balance
     def _mutate(self,uid,amount,reason,reference):
         with self._connect() as c:
             self._schema(c)
