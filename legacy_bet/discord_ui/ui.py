@@ -444,12 +444,205 @@ class LeagueGridButton(discord.ui.Button):
         matches = await view.service.matches_for_window(self.key, "future", 25)
         matches = sorted({str(m["event_id"]): m for m in matches}.values(), key=lambda m: str(m["commence_time"]))
         if self.mode == "browse":
-            embed = await build_league_embed(view.service, self.key, matches)
-            return await interaction.edit_original_response(embed=embed, view=MatchBrowserView(view.service, view.active, matches, self.key), attachments=[])
+            board = MatchBoardV2(view.service, view.active, self.key, matches)
+            return await interaction.edit_original_response(embed=None, content=None, view=board, attachments=[])
         if not matches:
             return await interaction.edit_original_response(embed=discord.Embed(title="⚽ AUCUN MATCH", description=f"**{COMPETITIONS[self.key]['name']}** n'a aucun match disponible pour le moment.", color=ODDIUM_MUTED), view=view, attachments=[])
         session = BetCarouselSession(view.service, view.active, matches, self.mode)
         await session.show(interaction)
+
+
+# ========================= V66 • MATCH BOARD COMPONENTS V2 =========================
+# Un vrai écran Discord : date -> matchs -> boutons 1/N/2 placés juste sous
+# chaque affiche. Aucun menu déroulant n'est utilisé dans ce parcours.
+
+class MatchOddV2Button(discord.ui.Button):
+    def __init__(self, service: BettingService, match, selection: str, label: str, odd: float):
+        style = discord.ButtonStyle.success if selection == "HOME" else (discord.ButtonStyle.secondary if selection == "DRAW" else discord.ButtonStyle.primary)
+        super().__init__(label=f"{label}  •  {odd:.2f}", style=style)
+        self.service = service
+        self.event_id = str(match["event_id"])
+        self.selection = selection
+        self.odd = float(odd)
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await GUARD.allow(interaction):
+            return
+        match = await self.service.db.fetchone("SELECT * FROM matches WHERE event_id=?", (self.event_id,))
+        if not match:
+            return await interaction.response.send_message("Ce match n'est plus disponible.", ephemeral=True)
+        if datetime.now(timezone.utc) >= parse_iso(match["commence_time"]):
+            return await interaction.response.send_message("🔒 Les paris pré-match sont fermés pour cette rencontre.", ephemeral=True)
+        await interaction.response.send_modal(StakeModal(self.service, self.event_id, self.selection, self.odd))
+
+
+class MatchBoardDateButton(discord.ui.Button):
+    def __init__(self, direction: int, disabled: bool = False):
+        self.direction = direction
+        super().__init__(
+            label="Jour précédent" if direction < 0 else "Jour suivant",
+            emoji="◀️" if direction < 0 else "▶️",
+            style=discord.ButtonStyle.secondary,
+            disabled=disabled,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, MatchBoardV2):
+            return
+        view.day_index = max(0, min(len(view.days) - 1, view.day_index + self.direction))
+        view.page = 0
+        view.rebuild()
+        await interaction.response.edit_message(view=view)
+
+
+class MatchBoardPageButton(discord.ui.Button):
+    def __init__(self, direction: int, disabled: bool = False):
+        self.direction = direction
+        super().__init__(emoji="◀️" if direction < 0 else "▶️", style=discord.ButtonStyle.secondary, disabled=disabled)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, MatchBoardV2):
+            return
+        view.page = max(0, min(view.page_count - 1, view.page + self.direction))
+        view.rebuild()
+        await interaction.response.edit_message(view=view)
+
+
+class MatchBoardLeaguesButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Championnats", emoji="🏆", style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, MatchBoardV2):
+            return
+        hub = LeagueHubV2(view.service, view.active)
+        await interaction.response.edit_message(view=hub)
+
+
+class LeagueHubV2Button(discord.ui.Button):
+    def __init__(self, key: str, row: int = 0):
+        info = COMPETITIONS[key]
+        super().__init__(label=info["name"][:70], emoji=info.get("emoji", "⚽"), style=discord.ButtonStyle.primary, row=row)
+        self.key = key
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, LeagueHubV2):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        matches = await view.service.matches_for_window(self.key, "future", 25)
+        matches = sorted({str(m["event_id"]): m for m in matches}.values(), key=lambda m: str(m["commence_time"]))
+        board = MatchBoardV2(view.service, view.active, self.key, matches)
+        await interaction.edit_original_response(view=board)
+
+
+class LeagueHubV2(discord.ui.LayoutView):
+    def __init__(self, service: BettingService, active: list[str]):
+        super().__init__(timeout=600)
+        self.service = service
+        self.active = [k for k in active if k in COMPETITIONS]
+        box = discord.ui.Container(accent_colour=ODDIUM_GOLD)
+        box.add_item(discord.ui.TextDisplay(
+            "# 🏆 ODDIUM • CHAMPIONNATS\n"
+            "Choisis directement ta compétition. **Aucun menu déroulant.**"
+        ))
+        box.add_item(discord.ui.Separator())
+        row = discord.ui.ActionRow()
+        for i, key in enumerate(self.active[:20]):
+            if i and i % 4 == 0:
+                box.add_item(row)
+                row = discord.ui.ActionRow()
+            row.add_item(LeagueHubV2Button(key))
+        if row.children:
+            box.add_item(row)
+        self.add_item(box)
+
+
+class MatchBoardV2(discord.ui.LayoutView):
+    PER_PAGE = 4
+
+    def __init__(self, service: BettingService, active: list[str], sport_key: str, matches, day_index: int = 0, page: int = 0):
+        super().__init__(timeout=600)
+        self.service = service
+        self.active = [k for k in active if k in COMPETITIONS]
+        self.sport_key = sport_key
+        self.matches = list(matches)
+        grouped = defaultdict(list)
+        for m in self.matches:
+            local = parse_iso(m["commence_time"]).astimezone(PARIS_TZ)
+            grouped[local.strftime("%Y-%m-%d")].append((local, m))
+        self.grouped = dict(sorted(grouped.items()))
+        self.days = list(self.grouped.keys())
+        self.day_index = max(0, min(day_index, len(self.days) - 1)) if self.days else 0
+        self.page = page
+        self.page_count = 1
+        self.rebuild()
+
+    def rebuild(self):
+        self.clear_items()
+        info = COMPETITIONS[self.sport_key]
+        box = discord.ui.Container(accent_colour=ODDIUM_GOLD)
+        if not self.days:
+            box.add_item(discord.ui.TextDisplay(
+                f"# {info.get('emoji','⚽')} {info['name'].upper()}\n"
+                "## Aucun match disponible\nReviens aux championnats pour choisir une autre compétition."
+            ))
+            row = discord.ui.ActionRow()
+            row.add_item(MatchBoardLeaguesButton())
+            box.add_item(row)
+            self.add_item(box)
+            return
+
+        key = self.days[self.day_index]
+        day_matches = self.grouped[key]
+        day = day_matches[0][0]
+        self.page_count = max(1, (len(day_matches) + self.PER_PAGE - 1) // self.PER_PAGE)
+        self.page = max(0, min(self.page, self.page_count - 1))
+        start = self.page * self.PER_PAGE
+        visible = day_matches[start:start + self.PER_PAGE]
+        weekdays = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
+
+        box.add_item(discord.ui.TextDisplay(
+            f"# {info.get('emoji','⚽')} {info['name'].upper()}\n"
+            f"## 📅 {weekdays[day.weekday()]} {day.strftime('%d/%m/%Y')}\n"
+            f"**{len(day_matches)} match(s)** • Page **{self.page + 1}/{self.page_count}**"
+        ))
+        box.add_item(discord.ui.Separator())
+
+        for idx, (local, m) in enumerate(visible):
+            box.add_item(discord.ui.TextDisplay(
+                f"### ⚽ {m['home_team']}  **VS**  {m['away_team']}\n"
+                f"🕘 **{local.strftime('%H:%M')}**　•　Clique directement sur ta cote"
+            ))
+            odds = discord.ui.ActionRow()
+            odds.add_item(MatchOddV2Button(self.service, m, "HOME", f"1  {m['home_team'][:18]}", float(m["home_odd"])))
+            odds.add_item(MatchOddV2Button(self.service, m, "DRAW", "N  Nul", float(m["draw_odd"])))
+            odds.add_item(MatchOddV2Button(self.service, m, "AWAY", f"2  {m['away_team'][:18]}", float(m["away_odd"])))
+            box.add_item(odds)
+            if idx != len(visible) - 1:
+                box.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+
+        box.add_item(discord.ui.Separator())
+        dates = discord.ui.ActionRow()
+        dates.add_item(MatchBoardDateButton(-1, self.day_index <= 0))
+        dates.add_item(discord.ui.Button(label=day.strftime("%d/%m"), emoji="📅", style=discord.ButtonStyle.success, disabled=True))
+        dates.add_item(MatchBoardDateButton(1, self.day_index >= len(self.days) - 1))
+        box.add_item(dates)
+
+        if self.page_count > 1:
+            pages = discord.ui.ActionRow()
+            pages.add_item(MatchBoardPageButton(-1, self.page <= 0))
+            pages.add_item(discord.ui.Button(label=f"Page {self.page + 1}/{self.page_count}", style=discord.ButtonStyle.secondary, disabled=True))
+            pages.add_item(MatchBoardPageButton(1, self.page >= self.page_count - 1))
+            box.add_item(pages)
+
+        nav = discord.ui.ActionRow()
+        nav.add_item(MatchBoardLeaguesButton())
+        box.add_item(nav)
+        self.add_item(box)
 
 class LeagueGridView(discord.ui.View):
     """V65: mur de compétitions, sans menu déroulant ni sélecteur de ligues."""
