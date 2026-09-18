@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -16,6 +17,7 @@ from .visuals import match_card
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 ASSET_DIR = Path(__file__).resolve().parents[2] / "assets"
+log = logging.getLogger(__name__)
 
 
 from .private_pages import show as open_private_page

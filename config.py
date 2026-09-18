@@ -65,7 +65,7 @@ class Settings:
     # Runtime / Discord refresh
     panel_refresh_seconds: int = _int("PANEL_REFRESH_SECONDS", 60)
     engine_tick_seconds: int = _int("ENGINE_TICK_SECONDS", 60)
-    live_poll_seconds: int = min(15, max(3, _int("LIVE_POLL_SECONDS", 5)))
+    live_poll_seconds: int = min(15, max(3, _int("LIVE_POLL_SECONDS", 10)))
     live_discovery_seconds: int = min(30, max(10, _int("LIVE_DISCOVERY_SECONDS", 15)))
     live_ws_host: str = os.getenv("LIVE_WS_HOST", "127.0.0.1")
     live_ws_port: int = _int("LIVE_WS_PORT", 8765)
