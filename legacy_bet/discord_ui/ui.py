@@ -47,7 +47,7 @@ def carousel_keys(active: list[str]) -> list[str]:
 
 
 def carousel_file(sport_key: str) -> discord.File | None:
-    """Retourne l'image locale du championnat pour les carrousels Discord."""
+    """Retourne l'image locale du championnat pour les sélecteurs Discord."""
     filename = CAROUSEL_ASSETS.get(sport_key)
     if not filename:
         return None
@@ -154,7 +154,7 @@ class OpenLeagueButton(discord.ui.Button):
 
 
 class LeagueCarouselView(discord.ui.View):
-    """Vrai carrousel Discord : une ligue à la fois + flèches précédent/suivant."""
+    """Vrai sélecteur Discord : une ligue à la fois + flèches précédent/suivant."""
 
     def __init__(self, service: BettingService, active: list[str], index: int = 0):
         super().__init__(timeout=300)
@@ -194,12 +194,8 @@ class BackToCarouselButton(discord.ui.Button):
         except ValueError:
             index = 0
         await interaction.response.defer(ephemeral=True, thinking=False)
-        embed = await build_carousel_embed(self.service, self.active, index)
-        await interaction.edit_original_response(
-            embed=embed,
-            view=LeagueCarouselView(self.service, self.active, index),
-            attachments=carousel_attachments(self.active, index),
-        )
+        embed = await league_hub_embed(self.service, self.active, "browse")
+        await interaction.edit_original_response(embed=embed, view=LeagueGridView(self.service, self.active, "browse"), attachments=[])
 
 
 class MatchBrowserView(discord.ui.View):
@@ -433,6 +429,47 @@ class BrowseLeagueCarouselView(discord.ui.View):
         self.add_item(BrowseNavButton(-1)); self.add_item(BrowseOpenLeagueButton(f"Voir {info['name']}")); self.add_item(BrowseNavButton(1))
 
 
+
+class LeagueGridButton(discord.ui.Button):
+    def __init__(self, key: str, mode: str, row: int):
+        info = COMPETITIONS[key]
+        super().__init__(label=info["name"][:70], emoji=info.get("emoji", "⚽"),
+                         style=discord.ButtonStyle.primary if mode == "browse" else discord.ButtonStyle.success, row=row)
+        self.key, self.mode = key, mode
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, LeagueGridView): return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        matches = await view.service.matches_for_window(self.key, "future", 25)
+        matches = sorted({str(m["event_id"]): m for m in matches}.values(), key=lambda m: str(m["commence_time"]))
+        if self.mode == "browse":
+            embed = await build_league_embed(view.service, self.key, matches)
+            return await interaction.edit_original_response(embed=embed, view=MatchBrowserView(view.service, view.active, matches, self.key), attachments=[])
+        if not matches:
+            return await interaction.edit_original_response(embed=discord.Embed(title="⚽ AUCUN MATCH", description=f"**{COMPETITIONS[self.key]['name']}** n'a aucun match disponible pour le moment.", color=ODDIUM_MUTED), view=view, attachments=[])
+        session = BetCarouselSession(view.service, view.active, matches, self.mode)
+        await session.show(interaction)
+
+class LeagueGridView(discord.ui.View):
+    """V65: mur de compétitions, sans menu déroulant ni sélecteur de ligues."""
+    def __init__(self, service: BettingService, active: list[str], mode: str = "browse"):
+        super().__init__(timeout=600)
+        self.service, self.active, self.mode = service, [k for k in active if k in COMPETITIONS], mode
+        for i, key in enumerate(self.active[:20]):
+            self.add_item(LeagueGridButton(key, mode, i // 4))
+
+async def league_hub_embed(service: BettingService, active: list[str], mode: str = "browse") -> discord.Embed:
+    counts=[]; total=0
+    for key in active:
+        n=len(await service.matches_for_window(key,"future",25)); total+=n
+        counts.append(f"{COMPETITIONS[key].get('emoji','⚽')} **{COMPETITIONS[key]['name']}** · `{n:02d}` match(s)")
+    title = "🎟️ ODDIUM • ARÈNE DES PARIS" if mode != "browse" else "⚽ ODDIUM • MATCH CENTER"
+    subtitle = "Choisis ton terrain. Le prochain ticket commence ici." if mode != "browse" else "Tout le football d'Oddium, sans détour."
+    e=discord.Embed(title=title, description=f"### {total:02d} MATCHS DISPONIBLES\n*{subtitle}*\n{ODDIUM_DIVIDER}\n"+"\n".join(counts), color=ODDIUM_GOLD)
+    e.set_footer(text=_footer("Choisis directement une compétition"))
+    return e
+
 class BetModeView(discord.ui.View):
     """Sportsbook entry: choose the bet mode, then choose the competition in a visual carousel."""
     def __init__(self, service: BettingService, active: list[str]):
@@ -443,10 +480,10 @@ class BetModeView(discord.ui.View):
     async def _open_leagues(self, interaction: discord.Interaction, mode: str):
         if not self.active:
             return await interaction.response.edit_message(
-                embed=_empty_bet_carousel("PARI SIMPLE" if mode == "simple" else "PARI COMBINÉ"),
+                embed=_empty_bet_carousel("DUEL SIMPLE" if mode == "simple" else "COMBO ROYAL"),
                 view=HomeReturnView(self.service), attachments=[])
-        view = BetLeagueCarouselView(self.service, self.active, mode, 0)
-        await view.render(interaction)
+        view = LeagueGridView(self.service, self.active, mode)
+        await interaction.response.edit_message(embed=await league_hub_embed(self.service, self.active, mode), view=view, attachments=[])
 
     @discord.ui.button(label="SIMPLE", emoji="🎯", style=discord.ButtonStyle.success)
     async def simple(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -487,7 +524,7 @@ class BetLeagueOpenButton(discord.ui.Button):
         unique = {str(m["event_id"]): m for m in matches}
         matches = sorted(unique.values(), key=lambda m: str(m["commence_time"]))
         if not matches:
-            mode_name = "PARI SIMPLE" if view.mode == "simple" else "PARI COMBINÉ"
+            mode_name = "DUEL SIMPLE" if view.mode == "simple" else "COMBO ROYAL"
             embed = discord.Embed(
                 title=f"◈ ODDIUM • {mode_name}",
                 description=f"**{COMPETITIONS[key]['name']}**\n\nAucun match disponible pour le moment.",
@@ -520,7 +557,7 @@ class BetLeagueCarouselView(discord.ui.View):
     async def render(self, interaction: discord.Interaction):
         key = self.active[self.index]
         info = COMPETITIONS[key]
-        mode_name = "PARI SIMPLE" if self.mode == "simple" else "PARI COMBINÉ"
+        mode_name = "DUEL SIMPLE" if self.mode == "simple" else "COMBO ROYAL"
         embed = discord.Embed(
             title=f"◈ ODDIUM • {mode_name}",
             description=(f"### CHOISIS TON CHAMPIONNAT\n"
@@ -583,7 +620,7 @@ class BetCarouselSession:
 
     def match_text(self):
         """Text block used by the Components V2 betting page."""
-        m=self.match; mode="PARI SIMPLE" if self.mode=="simple" else "PARI COMBINÉ"
+        m=self.match; mode="DUEL SIMPLE" if self.mode=="simple" else "COMBO ROYAL"
         lines=[
             f"## ◈ ODDIUM • {mode}",
             f"**{m['competition_name']}**　•　`{fmt_dt(m['commence_time'])}`",
@@ -715,9 +752,9 @@ BetMatchCarouselView = BetMatchCarouselLayout
 
 
 def combo_text_embed(session):
-    e=discord.Embed(title="🎟️ ODDIUM • PARI COMBINÉ",color=ODDIUM_GOLD)
+    e=discord.Embed(title="🎟️ ODDIUM • COMBO ROYAL",color=ODDIUM_GOLD)
     if not session.legs:
-        e.description=f"{ODDIUM_DIVIDER}\n**TICKET VIDE**\nAjoute au minimum **2 sélections** depuis le carrousel.\n{ODDIUM_DIVIDER}"
+        e.description=f"{ODDIUM_DIVIDER}\n**TICKET VIDE**\nAjoute au minimum **2 sélections** depuis le sélecteur.\n{ODDIUM_DIVIDER}"
     else:
         lines=[]
         for i,l in enumerate(session.legs,1):
@@ -789,10 +826,10 @@ class QuickHomeView(discord.ui.View):
         if not self.active:return await interaction.response.send_message("Aucun championnat actif.",ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=False)
         embed=await build_carousel_embed(self.service,self.active,0)
-        await interaction.edit_original_response(embed=embed,view=BrowseLeagueCarouselView(self.service,self.active,0),attachments=carousel_attachments(self.active,0))
+        await interaction.edit_original_response(embed=await league_hub_embed(self.service,self.active,"browse"),view=LeagueGridView(self.service,self.active,"browse"),attachments=[])
     @discord.ui.button(label="Parier",emoji="🎟️",style=discord.ButtonStyle.success)
     async def bet(self,interaction,button):
-        e=discord.Embed(title="🎟️ CHOISIS TON TYPE DE PARI",description="🎯 **Pari simple** — un pronostic 1/N/2\n🧩 **Pari combiné** — plusieurs matchs, une cote totale",color=discord.Color.gold())
+        e=discord.Embed(title="🎟️ CHOISIS TON STYLE DE JEU",description="🎯 **Pari simple** — un pronostic 1/N/2\n🧩 **Pari combiné** — plusieurs matchs, une cote totale",color=discord.Color.gold())
         await interaction.response.edit_message(embed=e,view=BetModeView(self.service,self.active),attachments=[])
 
 
@@ -886,32 +923,22 @@ def _score_line(row) -> str:
 
 async def build_title_embed(service: BettingService) -> discord.Embed:
     active = carousel_keys(await service.active_competitions())
-    available = 0
-    for key in active:
-        matches = await service.matches_for_window(key, "future", 25)
-        available += len(matches)
+    available = sum(len(await service.matches_for_window(k, "future", 25)) for k in active)
     live_count = len(await service.live_matches(25))
     pending = await service.db.fetchone("SELECT COUNT(*) c FROM bets WHERE status='PENDING'")
     combo_pending = await service.db.fetchone("SELECT COUNT(*) c FROM combo_bets WHERE status='PENDING'")
     open_tickets = int(pending["c"] if pending else 0) + int(combo_pending["c"] if combo_pending else 0)
-
-    e = discord.Embed(
-        title="✦  O D D I U M  ✦",
-        description=(
-            "### TON BOOKMAKER VIRTUEL\n"
-            "**Paris • Direct • Statistiques • Classement**\n"
-            f"{ODDIUM_DIVIDER}\n"
-            f"`⚽ {available:02d}` **MATCHS**　 `🔴 {live_count:02d}` **LIVE**　 `🎟️ {open_tickets:02d}` **EN COURS**\n"
-            f"{ODDIUM_DIVIDER}\n"
-            "Choisis un espace ci-dessous. Les cotes sont verrouillées à la validation du ticket."
-        ),
-        color=ODDIUM_GOLD,
-    )
+    e=discord.Embed(title="✦  O D D I U M  ✦", description=(
+        "### LE STADE T'ATTEND.\n**Analyse. Ose. Mise. Entre dans la légende.**\n"
+        f"{ODDIUM_DIVIDER}\n"
+        f"⚽ **{available}** matchs　 🔴 **{live_count}** en direct　 🎟️ **{open_tickets}** tickets ouverts\n"
+        f"{ODDIUM_DIVIDER}\n"
+        "**⚔️ MATCH CENTER** — explore les affiches\n"
+        "**🎟️ ARÈNE DES PARIS** — simple ou combo\n"
+        "**🏦 COFFRE** — fortune, carrière et prestige\n"
+        "**👑 HALL OF FAME** — grave ton nom au sommet"), color=ODDIUM_GOLD)
     e.set_image(url="attachment://oddium_welcome.png")
-    e.add_field(name="⚽ MATCH CENTER", value="Calendrier, rencontres et cotes", inline=True)
-    e.add_field(name="🎟️ BET DESK", value="Simple ou combiné", inline=True)
-    e.add_field(name="🏆 ODDIUM RANK", value="Profil et classement", inline=True)
-    e.set_footer(text=_footer("Cotes actualisées automatiquement"))
+    e.set_footer(text=_footer("Le jeu commence ici"))
     return e
 
 
@@ -997,7 +1024,7 @@ async def _profile_embed(service, user):
         color=ODDIUM_GOLD,
     )
     e.set_thumbnail(url=user.display_avatar.url)
-    e.add_field(name="SOLDE", value=f"### {fmt_num(balance)}\n{SETTINGS.currency_name}", inline=True)
+    e.add_field(name="COFFRE", value=f"### {fmt_num(balance)}\n{SETTINGS.currency_name}", inline=True)
     e.add_field(name="BÉNÉFICE", value=f"### {net:+,}".replace(',', ' ') + f"\n{SETTINGS.currency_name}", inline=True)
     e.add_field(name="RÉUSSITE", value=f"### {rate:.0f}%\n{wins}/{settled}", inline=True)
     e.add_field(name="PARIS SIMPLES", value=f"**{int(s['total'] or 0)}** joués  •  🟢 {wins}  •  🔴 {losses}", inline=False)
@@ -1008,7 +1035,7 @@ async def _profile_embed(service, user):
 
 async def _leaderboard_embed(service, bot):
     rows = await service.leaderboard(10)
-    e = discord.Embed(title="🏆  ODDIUM • HALL OF FAME", description=f"### CLASSEMENT GÉNÉRAL\n**Bénéfice net • performance • prestige**\n{ODDIUM_DIVIDER}", color=ODDIUM_GOLD)
+    e = discord.Embed(title="🏆  ODDIUM • HALL OF FAME", description=f"### HALL OF FAME GÉNÉRAL\n**Bénéfice net • performance • prestige**\n{ODDIUM_DIVIDER}", color=ODDIUM_GOLD)
     if not rows:
         e.description += "\n\nAucun joueur classé pour le moment."
         return e
@@ -1134,7 +1161,7 @@ class LivePanelView(discord.ui.View):
         followed = await self.service.followed_event_ids(interaction.user.id)
         await interaction.response.edit_message(content="**Choisis le match à suivre :**", embed=None, view=LiveFollowSelectView(self.service, matches, followed), attachments=[])
 
-    @discord.ui.button(label="Mes paris live", style=discord.ButtonStyle.success, emoji="🎟️", custom_id="oddium:v13:live:bets", row=0)
+    @discord.ui.button(label="Mes tickets live", style=discord.ButtonStyle.success, emoji="🎟️", custom_id="oddium:v13:live:bets", row=0)
     async def bets(self, interaction: discord.Interaction, button: discord.ui.Button):
         rows = await self.service.user_live_bets(interaction.user.id)
         if not rows:
@@ -1145,23 +1172,23 @@ class LivePanelView(discord.ui.View):
             winning = (r["selection"] == "HOME" and isinstance(hs, int) and isinstance(aws, int) and hs > aws) or (r["selection"] == "AWAY" and isinstance(hs, int) and isinstance(aws, int) and aws > hs) or (r["selection"] == "DRAW" and isinstance(hs, int) and hs == aws)
             state = "🟢 EN POSITION" if winning else "⚪ EN COURS"
             lines.append(f"{state}  **{r['home_team']} `{hs}-{aws}` {r['away_team']}**\n　BET-{r['id']} • mise **{fmt_num(r['stake'])}** • retour **{fmt_num(r['potential_payout'])} {SETTINGS.currency_name}**")
-        await interaction.response.edit_message(content=None, embed=discord.Embed(title="🎟️ MES PARIS LIVE", description="\n\n".join(lines), color=ODDIUM_GREEN), view=HomeReturnView(self.service), attachments=[])
+        await interaction.response.edit_message(content=None, embed=discord.Embed(title="🎟️ MES TICKETS LIVE", description="\n\n".join(lines), color=ODDIUM_GREEN), view=HomeReturnView(self.service), attachments=[])
 
 
 async def _balance_embed(service: BettingService, user: discord.abc.User) -> discord.Embed:
-    """Carte joueur Oddium : fortune + performances, sans jargon technique."""
+    """V64 — tableau de bord joueur : spectaculaire, lisible et 100 % Discord natif."""
     try:
         balance = await service.economy.get_balance(user.id)
         stats = await service.user_stats(user.id)
         combos = await service.user_combo_bets(user.id, 100)
     except Exception:
         e = discord.Embed(
-            title="💰  ODDIUM • MON COFFRE",
-            description="⚠️ **Impossible d’ouvrir ton coffre pour le moment.**\nRéessaie dans quelques instants.",
+            title="💰  ODDIUM • COFFRE JOUEUR",
+            description="⚠️ **Le coffre est momentanément inaccessible.**\nRéessaie dans quelques instants.",
             color=ODDIUM_RED,
         )
         e.set_thumbnail(url=user.display_avatar.url)
-        e.set_footer(text=_footer("Oddium • Espace joueur"))
+        e.set_footer(text=_footer("Espace joueur"))
         return e
 
     wins = int(stats["wins"] or 0)
@@ -1171,50 +1198,148 @@ async def _balance_embed(service: BettingService, user: discord.abc.User) -> dis
     wagered = int(stats["wagered"] or 0)
     returned = int(stats["returned"] or 0)
     net = returned - wagered
-    rate = (wins / settled * 100) if settled else 0
+    rate = (wins / settled * 100) if settled else 0.0
+    roi = (net / wagered * 100) if wagered else 0.0
     biggest_win = int(stats["biggest_win"] or 0)
     biggest_odd = float(stats["biggest_odd"] or 0)
 
+    # Progression purement joueur : 1 niveau tous les 10 paris réglés.
+    # Aucun nouveau stockage : elle suit automatiquement l'historique existant.
+    level = max(1, settled // 10 + 1)
+    level_progress = settled % 10
+    filled = level_progress
+    bar = "▰" * filled + "▱" * (10 - filled)
+
     if settled == 0:
-        form = "🌱 Nouveau parieur"
-    elif rate >= 70:
-        form = "🔥 En feu"
-    elif rate >= 50:
-        form = "⚡ En forme"
+        title, aura = "🌱 ESPOIR", "Premier ticket, première histoire."
+    elif settled < 10:
+        title, aura = "🥉 CHALLENGER", "La réputation commence ici."
+    elif settled < 25:
+        title, aura = "🥈 PRONOSTIQUEUR", "Tu commences à faire parler les cotes."
+    elif settled < 50:
+        title, aura = "🥇 EXPERT", "Ton nom s'installe dans le sportsbook."
+    elif settled < 100:
+        title, aura = "💎 ÉLITE", "Les gros tickets ne te font plus peur."
     else:
-        form = "🎯 En chasse"
+        title, aura = "👑 LÉGENDE ODDIUM", "Une carrière que le serveur connaît."
+
+    if settled == 0:
+        streak_text = "🌱 **NOUVEAU JOUEUR**"
+    elif rate >= 70:
+        streak_text = "🔥 **EN FEU**"
+    elif rate >= 50:
+        streak_text = "⚡ **EN FORME**"
+    else:
+        streak_text = "🎯 **EN CHASSE**"
+
+    net_icon = "📈" if net >= 0 else "📉"
+    roi_sign = "+" if roi > 0 else ""
 
     e = discord.Embed(
-        title=f"🏦  ODDIUM • COFFRE DE {user.display_name.upper()}",
+        title=f"🏦  COFFRE D'ODDIUM • {user.display_name.upper()}",
         description=(
-            f"## 🪙 {fmt_num(balance)} {SETTINGS.currency_name}\n"
-            f"*Ta fortune. Tes paris. Tes records.*\n"
-            f"{ODDIUM_DIVIDER}"
+            f"### 🪙  {fmt_num(balance)} {SETTINGS.currency_name}\n"
+            f"**FORTUNE DISPONIBLE**\n"
+            f"{ODDIUM_DIVIDER}\n"
+            f"{title}　•　**NIVEAU {level}**\n"
+            f"*{aura}*"
         ),
         color=ODDIUM_GOLD,
     )
     e.set_thumbnail(url=user.display_avatar.url)
-    e.add_field(name="🎟️ PARIS", value=f"**{total}** joués\n🟢 {wins} gagnés • 🔴 {losses} perdus", inline=True)
-    e.add_field(name="📈 BILAN", value=f"**{net:+,} {SETTINGS.currency_name}**".replace(',', ' ') + f"\n{rate:.0f}% de réussite", inline=True)
-    e.add_field(name="🔥 FORME", value=f"**{form}**\n{settled} paris réglés", inline=True)
-    e.add_field(name="👑 PLUS GROS COUP", value=f"**+{fmt_num(biggest_win)} {SETTINGS.currency_name}**\nCote record : **{biggest_odd:.2f}**", inline=True)
-    e.add_field(name="🧩 COMBINÉS", value=f"**{len(combos)}** tickets créés", inline=True)
-    e.add_field(name="💸 VOLUME JOUÉ", value=f"**{fmt_num(wagered)} {SETTINGS.currency_name}**", inline=True)
-    e.set_footer(text=_footer("Oddium • Fais parler les cotes."))
+
+    e.add_field(
+        name="🔥 ÉTAT DE FORME",
+        value=f"{streak_text}\n**{rate:.0f}%** de réussite",
+        inline=True,
+    )
+    e.add_field(
+        name="🎟️ CARRIÈRE",
+        value=f"**{settled}** paris réglés\n🟢 {wins}　🔴 {losses}",
+        inline=True,
+    )
+    e.add_field(
+        name=f"{net_icon} PERFORMANCE",
+        value=f"**{net:+,} {SETTINGS.currency_name}**\nROI **{roi_sign}{roi:.1f}%**".replace(',', ' '),
+        inline=True,
+    )
+
+    e.add_field(
+        name="⭐ PROGRESSION",
+        value=f"`{bar}`  **{level_progress}/10**\nEncore **{10-level_progress}** pari(s) réglé(s) avant le niveau {level + 1}.",
+        inline=False,
+    )
+
+    e.add_field(
+        name="👑 PLUS GROS COUP",
+        value=f"### +{fmt_num(biggest_win)}\n{SETTINGS.currency_name}",
+        inline=True,
+    )
+    e.add_field(
+        name="🎯 COTE RECORD",
+        value=f"### {biggest_odd:.2f}\nréussie",
+        inline=True,
+    )
+    e.add_field(
+        name="🧩 COMBINÉS",
+        value=f"### {len(combos)}\ntickets créés",
+        inline=True,
+    )
+
+    e.add_field(
+        name="💸 EMPIRE DU JOUEUR",
+        value=(
+            f"**{fmt_num(wagered)} {SETTINGS.currency_name}** engagés depuis tes débuts\n"
+            f"**{total}** ticket(s) enregistré(s) • Chaque pari écrit ta légende."
+        ),
+        inline=False,
+    )
+    e.set_footer(text=_footer("Fortune • Carrière • Prestige"))
     return e
 
 
 class BalanceView(discord.ui.View):
+    """Navigation du coffre V64 : les actions utiles sont accessibles sans revenir au menu."""
     def __init__(self, service: BettingService):
         super().__init__(timeout=300)
         self.service = service
 
-    @discord.ui.button(label="Actualiser", emoji="🔄", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, row=0)
+    async def bet(self, interaction: discord.Interaction, button: discord.ui.Button):
+        active = carousel_keys(await self.service.active_competitions())
+        if not active:
+            return await interaction.response.send_message("⚽ Aucun championnat actif pour le moment.", ephemeral=True)
+        e = discord.Embed(
+            title="🎟️  ODDIUM • SPORTSBOOK",
+            description="### À TOI DE JOUER\n**Simple ou combiné : choisis ton terrain.**\n" + ODDIUM_DIVIDER,
+            color=ODDIUM_GOLD,
+        )
+        e.add_field(name="🎯 DUEL SIMPLE", value="Un match • une sélection • une cote", inline=True)
+        e.add_field(name="🧩 COMBINÉ", value="Plusieurs matchs • une cote cumulée", inline=True)
+        await interaction.response.edit_message(embed=e, view=BetModeView(self.service, active), attachments=[])
+
+    @discord.ui.button(label="Mes tickets", emoji="📜", style=discord.ButtonStyle.primary, row=0)
+    async def my_bets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=await _my_bets_embed(self.service, interaction.user.id),
+            view=HomeReturnView(self.service),
+            attachments=[],
+        )
+
+    @discord.ui.button(label="Hall of Fame", emoji="🏆", style=discord.ButtonStyle.secondary, row=0)
+    async def ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=await _leaderboard_embed(self.service, interaction.client),
+            view=RankProfileView(self.service),
+            attachments=[],
+        )
+
+    @discord.ui.button(label="Actualiser", emoji="🔄", style=discord.ButtonStyle.secondary, row=1)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=False)
         await interaction.edit_original_response(embed=await _balance_embed(self.service, interaction.user), view=self, attachments=[])
 
-    @discord.ui.button(label="Retour à l'accueil", emoji="🏠", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Accueil", emoji="🏠", style=discord.ButtonStyle.secondary, row=1)
     async def home(self, interaction: discord.Interaction, button: discord.ui.Button):
         active = carousel_keys(await self.service.active_competitions())
         await interaction.response.edit_message(embed=await build_title_embed(self.service), view=QuickHomeView(self.service, active), attachments=[])
@@ -1231,7 +1356,7 @@ class MainPanelView(discord.ui.View):
         active = carousel_keys(await self.service.active_competitions())
         if not active:
             return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
-        await open_private_page(interaction, embed=await build_carousel_embed(self.service, active, 0), view=BrowseLeagueCarouselView(self.service, active, 0), files=carousel_attachments(active, 0), replace_existing=True)
+        await open_private_page(interaction, embed=await league_hub_embed(self.service, active, "browse"), view=LeagueGridView(self.service, active, "browse"), replace_existing=True)
 
     @discord.ui.button(label="Parier", emoji="🎟️", style=discord.ButtonStyle.success, custom_id="oddium:v13:bet", row=0)
     async def bet(self, interaction, button):
@@ -1242,7 +1367,7 @@ class MainPanelView(discord.ui.View):
         if not active:
             return await interaction.followup.send("Aucun championnat actif.", ephemeral=True)
         e = discord.Embed(
-            title="◈  ODDIUM • SPORTSBOOK",
+            title="✦ ODDIUM • ARÈNE DES PARIS",
             description=(
                 _bookmaker_header("BET DESK", "Compose ton ticket comme sur un vrai bookmaker.")
                 + "\n\n`SIMPLE`  1 sélection • cote fixe à validation"
@@ -1255,18 +1380,18 @@ class MainPanelView(discord.ui.View):
         e.set_footer(text=_footer("Sportsbook • choisis SIMPLE ou COMBINÉ"))
         await open_private_page(interaction, embed=e, view=BetModeView(self.service, active), replace_existing=True)
 
-    @discord.ui.button(label="Mes paris", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
+    @discord.ui.button(label="Mes tickets", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:mybets", row=0)
     async def mybets(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
         await open_private_page(interaction, embed=await _my_bets_embed(self.service, interaction.user.id), view=HomeReturnView(self.service), replace_existing=True)
 
-    @discord.ui.button(label="Solde", emoji="💰", style=discord.ButtonStyle.secondary, custom_id="oddium:v56:balance", row=1)
+    @discord.ui.button(label="Coffre", emoji="💰", style=discord.ButtonStyle.secondary, custom_id="oddium:v56:balance", row=1)
     async def balance(self, interaction, button):
         # ACK Discord *before* any database/private-page operation.  The previous
         # defer + followup path could occasionally arrive after Discord's component
         # acknowledgement window and raise 10062 (Unknown interaction).
         loading = discord.Embed(
-            title="💰  ODDIUM • MON SOLDE",
+            title="💰  ODDIUM • MON COFFRE",
             description="🔐 **Ouverture de ton coffre…**",
             color=ODDIUM_GOLD,
         )
@@ -1274,7 +1399,7 @@ class MainPanelView(discord.ui.View):
             await interaction.response.send_message(embed=loading, ephemeral=True)
         except discord.NotFound:
             log.warning(
-                "[SOLDE] interaction expirée avant ACK • user_id=%s • interaction_id=%s",
+                "[COFFRE] interaction expirée avant ACK • user_id=%s • interaction_id=%s",
                 interaction.user.id, interaction.id,
             )
             return
@@ -1287,14 +1412,14 @@ class MainPanelView(discord.ui.View):
             await interaction.edit_original_response(embed=embed, view=BalanceView(self.service))
         except discord.NotFound:
             log.warning(
-                "[SOLDE] réponse éphémère introuvable après ACK • user_id=%s",
+                "[COFFRE] réponse éphémère introuvable après ACK • user_id=%s",
                 interaction.user.id,
             )
         except Exception:
-            log.exception("[SOLDE] erreur affichage • user_id=%s", interaction.user.id)
+            log.exception("[COFFRE] erreur affichage • user_id=%s", interaction.user.id)
             try:
                 error_embed = discord.Embed(
-                    title="💰  ODDIUM • MON SOLDE",
+                    title="💰  ODDIUM • MON COFFRE",
                     description="⚠️ **Impossible de charger le solde pour le moment.**\nRéessaie dans quelques instants.",
                     color=ODDIUM_RED,
                 )
@@ -1307,7 +1432,7 @@ class MainPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         await open_private_page(interaction, embed=await _live_embed(self.service), view=LivePanelView(self.service), replace_existing=True)
 
-    @discord.ui.button(label="Classement", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
+    @discord.ui.button(label="Hall of Fame", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
     async def rank(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
         e = await _leaderboard_embed(self.service, interaction.client)
@@ -1373,7 +1498,7 @@ class StakeModal(discord.ui.Modal, title="🎟️ Confirmer la mise"):
         e.add_field(name="PRONOSTIC", value=f"**{label}**\nCote `{data['odd']:.2f}`", inline=True)
         e.add_field(name="MISE", value=f"**{fmt_num(stake)}**\n{SETTINGS.currency_name}", inline=True)
         e.add_field(name="RETOUR POTENTIEL", value=f"**{fmt_num(data['payout'])}**\n{SETTINGS.currency_name}", inline=True)
-        e.set_footer(text=f"Solde restant : {fmt_num(balance)} {SETTINGS.currency_name} • cote verrouillée")
+        e.set_footer(text=f"Coffre restant : {fmt_num(balance)} {SETTINGS.currency_name} • cote verrouillée")
         await interaction.followup.send(embed=e, ephemeral=True)
 
 
@@ -1639,13 +1764,13 @@ class MatchCenterView(discord.ui.View):
 
 async def build_carousel_embed(service: BettingService, active: list[str], index: int) -> discord.Embed:
     if not active:
-        return discord.Embed(title="◈ ODDIUM • SPORTSBOOK", description=_bookmaker_header("BET DESK", "Aucun championnat actif actuellement."), color=ODDIUM_GOLD)
+        return discord.Embed(title="✦ ODDIUM • ARÈNE DES PARIS", description=_bookmaker_header("BET DESK", "Aucun championnat actif actuellement."), color=ODDIUM_GOLD)
     index %= len(active)
     sport_key = active[index]
     info = COMPETITIONS[sport_key]
     matches = await service.matches_for_window(sport_key, "future", 25)
     e = discord.Embed(
-        title="◈  ODDIUM • SPORTSBOOK",
+        title="✦ ODDIUM • ARÈNE DES PARIS",
         description=(
             _bookmaker_header("LEAGUE LOBBY", f"{info['emoji']}  **{info['name'].upper()}**")
             + f"\n\n`{index + 1:02d} / {len(active):02d}`　◀  NAVIGATION CHAMPIONNATS  ▶"
