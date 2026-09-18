@@ -1133,6 +1133,36 @@ class BettingService:
                                       UNION SELECT DISTINCT event_id FROM combo_legs""")
         return {str(r["event_id"]) for r in rows}
 
+    async def filter_bet_live_matches(self, live_rows):
+        """Keep live fixtures that have a validated simple/combo bet.
+
+        V70: live provider rows can use a different event_id than the pre-match
+        market row. Match primarily by event_id, then by 5Dollar fixture id,
+        and finally by the home/away pair.
+        """
+        wagered = await self.db.fetchall(
+            """SELECT DISTINCT m.event_id,m.five_dollar_fixture_id,m.home_team,m.away_team
+               FROM matches m
+               WHERE EXISTS(SELECT 1 FROM bets b WHERE b.event_id=m.event_id)
+                  OR EXISTS(SELECT 1 FROM combo_legs cl JOIN combo_bets cb ON cb.id=cl.combo_id
+                            WHERE cl.event_id=m.event_id AND cb.status!='CREATING')"""
+        )
+        event_ids = {str(r["event_id"]) for r in wagered if r["event_id"] is not None}
+        fixture_ids = {str(r["five_dollar_fixture_id"]) for r in wagered if r["five_dollar_fixture_id"] is not None}
+        team_pairs = {(str(r["home_team"] or "").strip().casefold(), str(r["away_team"] or "").strip().casefold()) for r in wagered}
+        out = []
+        for m in live_rows:
+            eid = str(m["event_id"] if hasattr(m, "keys") and "event_id" in m.keys() else m.get("event_id") or "")
+            fid_val = (m["five_dollar_fixture_id"] if hasattr(m, "keys") and "five_dollar_fixture_id" in m.keys() else m.get("five_dollar_fixture_id"))
+            if fid_val is None and not hasattr(m, "keys"):
+                fid_val = m.get("fixture_id") or m.get("id")
+            fid = str(fid_val) if fid_val is not None else ""
+            home = str(m["home_team"] if hasattr(m, "keys") and "home_team" in m.keys() else m.get("home_team") or "").strip().casefold()
+            away = str(m["away_team"] if hasattr(m, "keys") and "away_team" in m.keys() else m.get("away_team") or "").strip().casefold()
+            if eid in event_ids or (fid and fid in fixture_ids) or (home, away) in team_pairs:
+                out.append(m)
+        return out
+
     async def user_live_bets(self, user_id: int, limit: int = 10):
         return await self.db.fetchall(
             """SELECT b.*,m.home_team,m.away_team,m.home_score,m.away_score,m.live_phase,m.live_clock

@@ -140,7 +140,7 @@ class PanelManager:
 
     async def build_live_embed(self) -> discord.Embed:
         """Build the single canonical Oddium live presentation."""
-        return await _live_embed(self.service)
+        return await _live_embed(self.service, wagered_only=False)
 
     async def _find_existing_live_panel(self, channel: discord.TextChannel):
         """Find an existing Oddium live board when DB state was lost after a redeploy."""
@@ -164,7 +164,7 @@ class PanelManager:
         # A single lock makes creation/edit atomic inside the process.
         async with self._live_panel_lock:
             embed = await self.build_live_embed()
-            view = LivePanelView(self.service)
+            view = LivePanelView(self.service, wagered_only=False)
             message_id = await self.service.db.get_setting("live_panel_message_id")
             msg = None
             if message_id:
@@ -230,5 +230,5 @@ class PanelManager:
         except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
             return
         embed = await self.build_live_embed()
-        view = LivePanelView(self.service)
+        view = LivePanelView(self.service, wagered_only=False)
         await msg.edit(embed=embed, view=view)

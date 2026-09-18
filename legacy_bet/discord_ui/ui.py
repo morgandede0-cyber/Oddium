@@ -1466,19 +1466,27 @@ class LiveDetailsSelectView(discord.ui.View):
 
 
 class LivePanelView(discord.ui.View):
-    def __init__(self, service: BettingService):
-        super().__init__(timeout=None); self.service = service
+    def __init__(self, service: BettingService, *, wagered_only: bool = False):
+        super().__init__(timeout=None)
+        self.service = service
+        # Public /setup_live board: False => every live fixture.
+        # Private Live button: True => only fixtures with a validated wager.
+        self.wagered_only = wagered_only
 
     @discord.ui.button(label="Détails", style=discord.ButtonStyle.primary, emoji="📊", custom_id="oddium:v13:live:details", row=0)
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
-        matches = [m for m in await self.service.live_matches(25) if str(m["event_id"]) in await self.service.bet_event_ids()]
+        matches = await self.service.live_matches(25)
+        if self.wagered_only:
+            matches = await self.service.filter_bet_live_matches(matches)
         if not matches:
             return await interaction.response.send_message("⚽ Aucun match live actuellement.", ephemeral=True)
         await interaction.response.edit_message(content="**Choisis un match pour ouvrir sa fiche :**", embed=None, view=LiveDetailsSelectView(self.service, matches), attachments=[])
 
     @discord.ui.button(label="Suivre", style=discord.ButtonStyle.danger, emoji="🔔", custom_id="oddium:v13:live:follow", row=0)
     async def follow(self, interaction: discord.Interaction, button: discord.ui.Button):
-        matches = [m for m in await self.service.live_matches(25) if str(m["event_id"]) in await self.service.bet_event_ids()]
+        matches = await self.service.live_matches(25)
+        if self.wagered_only:
+            matches = await self.service.filter_bet_live_matches(matches)
         if not matches:
             return await interaction.response.send_message("⚽ Aucun match live à suivre.", ephemeral=True)
         followed = await self.service.followed_event_ids(interaction.user.id)
@@ -1798,7 +1806,7 @@ class MainPanelView(discord.ui.View):
     @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
     async def live(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
-        await open_private_page(interaction, embed=await _live_embed(self.service), view=LivePanelView(self.service), replace_existing=True)
+        await open_private_page(interaction, embed=await _live_embed(self.service, wagered_only=True), view=LivePanelView(self.service, wagered_only=True), replace_existing=True)
 
     @discord.ui.button(label="Hall of Fame", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
     async def rank(self, interaction, button):
@@ -2200,10 +2208,11 @@ async def build_league_embed(service: BettingService, sport_key: str, matches) -
     e.set_footer(text=_footer(f"Match Board • {len(matches)} marché(s) ouverts"))
     return e
 
-async def _live_embed(service):
+async def _live_embed(service, *, wagered_only: bool = False):
+    """Build Live Arena. Public board shows all live fixtures; private Live may filter to wagered fixtures."""
     rows = await service.live_matches(25)
-    bet_events = await service.bet_event_ids()
-    rows = [m for m in rows if str(m["event_id"]) in bet_events]
+    if wagered_only:
+        rows = await service.filter_bet_live_matches(rows)
     e = discord.Embed(
         title="🔴  ODDIUM • LIVE ARENA",
         description=(
