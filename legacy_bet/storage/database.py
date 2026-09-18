@@ -149,6 +149,9 @@ class Database:
                     notify_odds_change INTEGER NOT NULL DEFAULT 0
                 );
 
+                -- V69: preferences are opt-in and live alerts have their own switch.
+                -- ALTER is executed below for databases created by older Oddium versions.
+
                 CREATE TABLE IF NOT EXISTS live_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id TEXT NOT NULL,
@@ -227,6 +230,7 @@ class Database:
             await self._ensure_column(db, "matches", "live_source", "TEXT")
             await self._ensure_column(db, "matches", "five_dollar_fixture_id", "INTEGER")
             await self._ensure_column(db, "bets", "settlement_note", "TEXT")
+            await self._ensure_column(db, "user_preferences", "notify_live", "INTEGER NOT NULL DEFAULT 0")
 
             # IMPORTANT: indexes that reference columns introduced by migrations
             # must be created only *after* those columns exist. Older Oddium

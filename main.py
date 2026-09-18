@@ -81,6 +81,9 @@ async def notify_live_followers(event: dict):
     reference = f"{event_id}:{fp}"
     for row in followers:
         uid=int(row["user_id"])
+        prefs = await service.ensure_preferences(uid)
+        if not prefs["dm_notifications"] or not prefs["notify_live"]:
+            continue
         # A retry/reconnect/redeploy must never send the same live alert twice.
         # notification_log is UNIQUE(user, kind, reference), so this remains safe
         # across process restarts as well.

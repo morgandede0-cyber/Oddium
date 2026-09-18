@@ -1525,6 +1525,23 @@ class BettingService:
         return await self.db.fetchone("SELECT * FROM user_preferences WHERE user_id=?", (user_id,))
 
 
+    async def set_notification_preference(self, user_id: int, key: str, enabled: bool):
+        allowed = {"dm_notifications", "notify_result", "notify_before_match", "notify_odds_change", "notify_live"}
+        if key not in allowed:
+            raise ValueError(f"Préférence inconnue: {key}")
+        await self.ensure_preferences(user_id)
+        await self.db.execute(f"UPDATE user_preferences SET {key}=? WHERE user_id=?", (1 if enabled else 0, user_id))
+        return await self.ensure_preferences(user_id)
+
+    async def set_all_notifications(self, user_id: int, enabled: bool):
+        await self.ensure_preferences(user_id)
+        v = 1 if enabled else 0
+        await self.db.execute(
+            "UPDATE user_preferences SET dm_notifications=?,notify_result=?,notify_before_match=?,notify_odds_change=?,notify_live=? WHERE user_id=?",
+            (v, v, v, v, v, user_id),
+        )
+        return await self.ensure_preferences(user_id)
+
     async def mark_notification_sent(self, user_id: int, kind: str, reference: str) -> bool:
         try:
             await self.db.execute(

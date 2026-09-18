@@ -1661,6 +1661,79 @@ class BalanceView(discord.ui.View):
         await interaction.response.edit_message(embed=await build_title_embed(self.service), view=QuickHomeView(self.service, active), attachments=[])
 
 
+
+async def _notifications_embed(service: BettingService, user_id: int) -> discord.Embed:
+    p = await service.ensure_preferences(user_id)
+    def state(key): return "🟢 ACTIVÉ" if bool(p[key]) else "⚫ DÉSACTIVÉ"
+    master = "🔔 Notifications privées autorisées" if bool(p["dm_notifications"]) else "🔕 Notifications privées coupées"
+    e = discord.Embed(
+        title="🔔 ODDIUM • MES NOTIFICATIONS",
+        description=f"**{master}**\n\nChoisis seulement les alertes que tu souhaites recevoir en message privé.",
+        color=ODDIUM_GREEN if bool(p["dm_notifications"]) else ODDIUM_DARK,
+    )
+    e.add_field(name="🎟️ Résultats de mes tickets", value=state("notify_result"), inline=True)
+    e.add_field(name="⏰ Avant le coup d'envoi", value=state("notify_before_match"), inline=True)
+    e.add_field(name="🔴 Événements Live", value=state("notify_live"), inline=True)
+    e.add_field(name="📈 Changement de cote", value=state("notify_odds_change"), inline=True)
+    e.set_footer(text="Tes choix sont personnels et sauvegardés automatiquement.")
+    return e
+
+class NotificationToggleButton(discord.ui.Button):
+    LABELS = {
+        "notify_result": ("Résultats", "🎟️"),
+        "notify_before_match": ("Avant match", "⏰"),
+        "notify_live": ("Live", "🔴"),
+        "notify_odds_change": ("Cotes", "📈"),
+    }
+    def __init__(self, service, key, enabled):
+        label, emoji = self.LABELS[key]
+        super().__init__(label=f"{label} : {'ON' if enabled else 'OFF'}", emoji=emoji,
+                         style=discord.ButtonStyle.success if enabled else discord.ButtonStyle.secondary, row=0)
+        self.service, self.key = service, key
+    async def callback(self, interaction):
+        prefs = await self.service.ensure_preferences(interaction.user.id)
+        await self.service.set_notification_preference(interaction.user.id, self.key, not bool(prefs[self.key]))
+        await interaction.response.edit_message(embed=await _notifications_embed(self.service, interaction.user.id), view=NotificationSettingsView(self.service, interaction.user.id))
+
+class NotificationMasterButton(discord.ui.Button):
+    def __init__(self, service, enabled):
+        super().__init__(label="Couper tous les DM" if enabled else "Autoriser les DM", emoji="🔕" if enabled else "🔔",
+                         style=discord.ButtonStyle.danger if enabled else discord.ButtonStyle.success, row=1)
+        self.service, self.enabled = service, enabled
+    async def callback(self, interaction):
+        await self.service.set_notification_preference(interaction.user.id, "dm_notifications", not self.enabled)
+        await interaction.response.edit_message(embed=await _notifications_embed(self.service, interaction.user.id), view=NotificationSettingsView(self.service, interaction.user.id))
+
+class NotificationAllButton(discord.ui.Button):
+    def __init__(self, service, enabled):
+        super().__init__(label="Tout activer" if enabled else "Tout couper", emoji="🔔" if enabled else "🔕",
+                         style=discord.ButtonStyle.primary, row=1)
+        self.service, self.enabled = service, enabled
+    async def callback(self, interaction):
+        await self.service.set_all_notifications(interaction.user.id, self.enabled)
+        await interaction.response.edit_message(embed=await _notifications_embed(self.service, interaction.user.id), view=NotificationSettingsView(self.service, interaction.user.id))
+
+class NotificationHomeButton(discord.ui.Button):
+    def __init__(self, service):
+        super().__init__(label="Accueil", emoji="🏠", style=discord.ButtonStyle.secondary, row=1); self.service=service
+    async def callback(self, interaction):
+        active=carousel_keys(await self.service.active_competitions())
+        await interaction.response.edit_message(embed=await build_title_embed(self.service), view=QuickHomeView(self.service,active))
+
+class NotificationSettingsView(discord.ui.View):
+    def __init__(self, service, user_id, prefs=None):
+        super().__init__(timeout=300); self.service=service; self.user_id=user_id
+        if prefs is not None: self._build(prefs)
+    def _build(self, p):
+        for key in ("notify_result","notify_before_match","notify_live","notify_odds_change"):
+            self.add_item(NotificationToggleButton(self.service,key,bool(p[key])))
+        self.add_item(NotificationMasterButton(self.service,bool(p["dm_notifications"])))
+        self.add_item(NotificationAllButton(self.service,True)); self.add_item(NotificationAllButton(self.service,False))
+        self.add_item(NotificationHomeButton(self.service))
+    @classmethod
+    async def create(cls, service, user_id):
+        p=await service.ensure_preferences(user_id); return cls(service,user_id,p)
+
 class MainPanelView(discord.ui.View):
     """Cinq accès maximum, aucune action redondante."""
     def __init__(self, service: BettingService, active: list[str]):
@@ -1732,6 +1805,13 @@ class MainPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=False)
         e = await _leaderboard_embed(self.service, interaction.client)
         await open_private_page(interaction, embed=e, view=RankProfileView(self.service), replace_existing=True)
+
+
+    @discord.ui.button(label="Notifications", emoji="🔔", style=discord.ButtonStyle.secondary, custom_id="oddium:v69:notifications", row=2)
+    async def notifications(self, interaction, button):
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        view = await NotificationSettingsView.create(self.service, interaction.user.id)
+        await open_private_page(interaction, embed=await _notifications_embed(self.service, interaction.user.id), view=view, replace_existing=True)
 
 # --- Premium betting flow ---------------------------------------------------
 
