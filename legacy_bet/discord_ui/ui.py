@@ -923,7 +923,13 @@ def _score_line(row) -> str:
 
 async def build_title_embed(service: BettingService) -> discord.Embed:
     active = carousel_keys(await service.active_competitions())
-    available = sum(len(await service.matches_for_window(k, "future", 25)) for k in active)
+    # Les appels sont asynchrones : une comprehension contenant ``await``
+    # devient un générateur asynchrone et ne peut pas être passée à sum().
+    # On additionne explicitement les résultats pour garder /setup fiable.
+    available = 0
+    for competition_key in active:
+        matches = await service.matches_for_window(competition_key, "future", 25)
+        available += len(matches)
     live_count = len(await service.live_matches(25))
     pending = await service.db.fetchone("SELECT COUNT(*) c FROM bets WHERE status='PENDING'")
     combo_pending = await service.db.fetchone("SELECT COUNT(*) c FROM combo_bets WHERE status='PENDING'")
