@@ -1240,13 +1240,45 @@ class MainPanelView(discord.ui.View):
 
     @discord.ui.button(label="Solde", emoji="💰", style=discord.ButtonStyle.secondary, custom_id="oddium:v56:balance", row=1)
     async def balance(self, interaction, button):
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        await open_private_page(
-            interaction,
-            embed=await _balance_embed(self.service, interaction.user),
-            view=BalanceView(self.service),
-            replace_existing=True,
+        # ACK Discord *before* any database/private-page operation.  The previous
+        # defer + followup path could occasionally arrive after Discord's component
+        # acknowledgement window and raise 10062 (Unknown interaction).
+        loading = discord.Embed(
+            title="💰  ODDIUM • MON SOLDE",
+            description="### GOLD PARTAGÉ AVEC ALTHERYA\nChargement du portefeuille commun…",
+            color=ODDIUM_GOLD,
         )
+        try:
+            await interaction.response.send_message(embed=loading, ephemeral=True)
+        except discord.NotFound:
+            log.warning(
+                "[SOLDE] interaction expirée avant ACK • user_id=%s • interaction_id=%s",
+                interaction.user.id, interaction.id,
+            )
+            return
+
+        # Once acknowledged, PostgreSQL can take as long as needed without losing
+        # the Discord interaction token. Edit the already-created ephemeral message
+        # instead of creating a followup.
+        try:
+            embed = await _balance_embed(self.service, interaction.user)
+            await interaction.edit_original_response(embed=embed, view=BalanceView(self.service))
+        except discord.NotFound:
+            log.warning(
+                "[SOLDE] réponse éphémère introuvable après ACK • user_id=%s",
+                interaction.user.id,
+            )
+        except Exception:
+            log.exception("[SOLDE] erreur affichage • user_id=%s", interaction.user.id)
+            try:
+                error_embed = discord.Embed(
+                    title="💰  ODDIUM • MON SOLDE",
+                    description="⚠️ **Impossible de charger le solde pour le moment.**\nRéessaie dans quelques instants.",
+                    color=ODDIUM_RED,
+                )
+                await interaction.edit_original_response(embed=error_embed, view=BalanceView(self.service))
+            except Exception:
+                pass
 
     @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
     async def live(self, interaction, button):
