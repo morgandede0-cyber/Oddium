@@ -1147,7 +1147,7 @@ class LivePanelView(discord.ui.View):
 
 
 async def _balance_embed(service: BettingService, user: discord.abc.User) -> discord.Embed:
-    """Solde Gold partagé, lu en temps réel depuis Altherya."""
+    """Solde Gold partagé, lu en temps réel depuis l’économie commune."""
     try:
         balance = await service.economy.get_balance(user.id)
     except Exception:
@@ -1162,7 +1162,7 @@ async def _balance_embed(service: BettingService, user: discord.abc.User) -> dis
             color=ODDIUM_RED,
         )
         e.set_thumbnail(url=user.display_avatar.url)
-        e.set_footer(text=_footer("Économie Altherya • connexion requise"))
+        e.set_footer(text=_footer("Économie commune Altherya • connexion requise"))
         return e
 
     e = discord.Embed(
@@ -1171,7 +1171,7 @@ async def _balance_embed(service: BettingService, user: discord.abc.User) -> dis
             "### GOLD PARTAGÉ AVEC ALTHERYA\n"
             f"{ODDIUM_DIVIDER}\n"
             f"## **{fmt_num(balance)} {SETTINGS.currency_name}**\n"
-            "Ce solde est récupéré **en temps réel depuis Altherya** et sert directement à tes mises Oddium."
+            "Ce solde est récupéré **en temps réel depuis l’économie commune** et sert directement à tes mises Oddium."
         ),
         color=ODDIUM_GOLD,
     )

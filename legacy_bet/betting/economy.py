@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from ..storage.database import Database, utcnow_iso
-from ..integrations.altherya.client import AltheryaBridgeClient, AltheryaBridgeError
+from ..integrations.shared_economy import SharedEconomyClient, SharedEconomyError
 
 
 class EconomyAdapter:
-    """Oddium economy backed by Altherya's authoritative ``wallet_gold``.
+    """Oddium economy backed by the shared Altherya/Oddium PostgreSQL wallet.
 
     Oddium keeps only its idempotency/audit ledger. It never maintains an
     independent spendable balance when the Altherya bridge is configured.
     """
 
-    def __init__(self, db: Database, bridge: AltheryaBridgeClient):
+    def __init__(self, db: Database, bridge: SharedEconomyClient):
         self.db = db
         self.bridge = bridge
 
@@ -22,7 +22,7 @@ class EconomyAdapter:
     async def get_balance(self, user_id: int) -> int:
         await self.ensure_user(user_id)
         if not self.bridge.enabled:
-            raise AltheryaBridgeError("Gold indisponible : pont Altherya non configuré")
+            raise SharedEconomyError("Gold indisponible : économie commune non configurée")
         return await self.bridge.get_balance(user_id)
 
     async def _already_recorded(self, user_id: int, reason: str, reference: str) -> bool:

@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 from config import SETTINGS
 from legacy_bet.storage.database import Database
 from legacy_bet.betting.economy import EconomyAdapter
-from legacy_bet.integrations.altherya.client import AltheryaBridgeClient
+from legacy_bet.integrations.shared_economy import SharedEconomyClient
 from legacy_bet.providers.gateway import OddsAPI
 from legacy_bet.discord_ui.panel import PanelManager
 from legacy_bet.betting.service import BettingService
@@ -39,7 +39,7 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 db = Database()
-altherya_bridge = AltheryaBridgeClient(SETTINGS.altherya_bridge_url, SETTINGS.altherya_bridge_token)
+altherya_bridge = SharedEconomyClient(SETTINGS.economy_database_url)
 economy = EconomyAdapter(db, altherya_bridge)
 odds_api = OddsAPI(db)
 service = BettingService(db, economy, odds_api)
