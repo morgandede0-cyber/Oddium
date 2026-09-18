@@ -116,6 +116,17 @@ async def on_ready():
 @bot.event
 async def setup_hook():
     await db.init()
+    if not altherya_bridge.enabled:
+        raise RuntimeError("[ECONOMIE COMMUNE] ECONOMY_DATABASE_URL absente : Oddium refuse de démarrer avec un portefeuille local")
+    try:
+        diag = await altherya_bridge.initialize()
+    except Exception:
+        log.exception("[ECONOMIE COMMUNE] Connexion PostgreSQL impossible")
+        raise
+    log.info(
+        "[ECONOMIE COMMUNE] PostgreSQL actif • db=%s • host=%s:%s • wallets=%s • empreinte=%s",
+        diag["database"], diag["host"], diag["port"], diag["wallets"], diag["fingerprint"],
+    )
     await odds_api.start()
     await live_ws.start()
     # V35: les logos sont mis en cache en arrière-plan; cela ne crée aucun panneau Discord.

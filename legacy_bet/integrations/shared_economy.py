@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, json, logging
+import asyncio, hashlib, json, logging
 try:
     import psycopg
 except Exception:
@@ -18,6 +18,20 @@ class SharedEconomyClient:
         c.execute('CREATE TABLE IF NOT EXISTS economy_wallets(user_id BIGINT PRIMARY KEY,balance BIGINT NOT NULL DEFAULT 0 CHECK(balance>=0),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())')
         c.execute('CREATE TABLE IF NOT EXISTS economy_transactions(id BIGSERIAL PRIMARY KEY,source TEXT NOT NULL,reference TEXT NOT NULL,user_id BIGINT NOT NULL,amount BIGINT NOT NULL,reason TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),UNIQUE(source,reason,reference))')
         c.execute('CREATE TABLE IF NOT EXISTS economy_events(id BIGSERIAL PRIMARY KEY,source TEXT NOT NULL,event_key TEXT NOT NULL UNIQUE,payload JSONB NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),processed_at TIMESTAMPTZ)')
+
+    def _diagnostics(self):
+        """Validate PostgreSQL at startup and return non-secret connection diagnostics."""
+        with self._connect() as c:
+            self._schema(c)
+            row = c.execute("SELECT current_database(), current_user, inet_server_addr()::text, inet_server_port()").fetchone()
+            count = c.execute("SELECT COUNT(*) FROM economy_wallets").fetchone()[0]
+            c.commit()
+        fingerprint = hashlib.sha256(self.url.encode("utf-8")).hexdigest()[:12]
+        return {"database": str(row[0]), "user": str(row[1]), "host": str(row[2]), "port": int(row[3]), "wallets": int(count), "fingerprint": fingerprint}
+
+    async def initialize(self):
+        return await asyncio.to_thread(self._diagnostics)
+
     def _balance(self,uid):
         with self._connect() as c:
             self._schema(c); c.execute('INSERT INTO economy_wallets(user_id,balance) VALUES(%s,0) ON CONFLICT DO NOTHING',(uid,)); r=c.execute('SELECT balance FROM economy_wallets WHERE user_id=%s',(uid,)).fetchone(); c.commit(); return int(r[0])
