@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     environment:
       TZ: Europe/Paris
+      ECONOMY_DATABASE_URL: ${ECONOMY_DATABASE_URL}
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       FIVE_DOLLAR_FOOTBALL_API_KEY: ${FIVE_DOLLAR_FOOTBALL_API_KEY}
       ALTHERYA_BRIDGE_URL: ${ALTHERYA_BRIDGE_URL}
