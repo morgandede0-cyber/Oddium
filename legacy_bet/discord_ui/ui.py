@@ -1149,38 +1149,58 @@ class LivePanelView(discord.ui.View):
 
 
 async def _balance_embed(service: BettingService, user: discord.abc.User) -> discord.Embed:
-    """Solde Gold partagé, lu en temps réel depuis l’économie commune."""
+    """Carte joueur Oddium : fortune + performances, sans jargon technique."""
     try:
         balance = await service.economy.get_balance(user.id)
+        stats = await service.user_stats(user.id)
+        combos = await service.user_combo_bets(user.id, 100)
     except Exception:
         e = discord.Embed(
-            title="💰  ODDIUM • MON SOLDE",
-            description=(
-                "### GOLD PARTAGÉ AVEC ALTHERYA\n"
-                f"{ODDIUM_DIVIDER}\n"
-                "⚠️ **Solde momentanément indisponible.**\n"
-                "Oddium ne bascule pas sur un portefeuille local : réessaie dans quelques instants."
-            ),
+            title="💰  ODDIUM • MON COFFRE",
+            description="⚠️ **Impossible d’ouvrir ton coffre pour le moment.**\nRéessaie dans quelques instants.",
             color=ODDIUM_RED,
         )
         e.set_thumbnail(url=user.display_avatar.url)
-        e.set_footer(text=_footer("Économie commune Altherya • connexion requise"))
+        e.set_footer(text=_footer("Oddium • Espace joueur"))
         return e
 
+    wins = int(stats["wins"] or 0)
+    losses = int(stats["losses"] or 0)
+    settled = wins + losses
+    total = int(stats["total"] or 0)
+    wagered = int(stats["wagered"] or 0)
+    returned = int(stats["returned"] or 0)
+    net = returned - wagered
+    rate = (wins / settled * 100) if settled else 0
+    biggest_win = int(stats["biggest_win"] or 0)
+    biggest_odd = float(stats["biggest_odd"] or 0)
+
+    if settled == 0:
+        form = "🌱 Nouveau parieur"
+    elif rate >= 70:
+        form = "🔥 En feu"
+    elif rate >= 50:
+        form = "⚡ En forme"
+    else:
+        form = "🎯 En chasse"
+
     e = discord.Embed(
-        title="💰  ODDIUM • MON SOLDE",
+        title=f"🏦  ODDIUM • COFFRE DE {user.display_name.upper()}",
         description=(
-            "### GOLD PARTAGÉ AVEC ALTHERYA\n"
-            f"{ODDIUM_DIVIDER}\n"
-            f"## **{fmt_num(balance)} {SETTINGS.currency_name}**\n"
-            "Ce solde est récupéré **en temps réel depuis l’économie commune** et sert directement à tes mises Oddium."
+            f"## 🪙 {fmt_num(balance)} {SETTINGS.currency_name}\n"
+            f"*Ta fortune. Tes paris. Tes records.*\n"
+            f"{ODDIUM_DIVIDER}"
         ),
         color=ODDIUM_GOLD,
     )
     e.set_thumbnail(url=user.display_avatar.url)
-    e.add_field(name="🔗 PORTEFEUILLE", value="**Altherya ↔ Oddium**\nUn seul solde Gold", inline=True)
-    e.add_field(name="🎟️ UTILISATION", value="Mises • gains • remboursements", inline=True)
-    e.set_footer(text=_footer("Solde actualisé à l'ouverture"))
+    e.add_field(name="🎟️ PARIS", value=f"**{total}** joués\n🟢 {wins} gagnés • 🔴 {losses} perdus", inline=True)
+    e.add_field(name="📈 BILAN", value=f"**{net:+,} {SETTINGS.currency_name}**".replace(',', ' ') + f"\n{rate:.0f}% de réussite", inline=True)
+    e.add_field(name="🔥 FORME", value=f"**{form}**\n{settled} paris réglés", inline=True)
+    e.add_field(name="👑 PLUS GROS COUP", value=f"**+{fmt_num(biggest_win)} {SETTINGS.currency_name}**\nCote record : **{biggest_odd:.2f}**", inline=True)
+    e.add_field(name="🧩 COMBINÉS", value=f"**{len(combos)}** tickets créés", inline=True)
+    e.add_field(name="💸 VOLUME JOUÉ", value=f"**{fmt_num(wagered)} {SETTINGS.currency_name}**", inline=True)
+    e.set_footer(text=_footer("Oddium • Fais parler les cotes."))
     return e
 
 
@@ -1247,7 +1267,7 @@ class MainPanelView(discord.ui.View):
         # acknowledgement window and raise 10062 (Unknown interaction).
         loading = discord.Embed(
             title="💰  ODDIUM • MON SOLDE",
-            description="### GOLD PARTAGÉ AVEC ALTHERYA\nChargement du portefeuille commun…",
+            description="🔐 **Ouverture de ton coffre…**",
             color=ODDIUM_GOLD,
         )
         try:
