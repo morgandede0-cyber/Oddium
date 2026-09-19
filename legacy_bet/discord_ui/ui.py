@@ -500,14 +500,33 @@ class UniversalValidateButton(discord.ui.Button):
         if not _draft_for(interaction.user.id): return await interaction.response.send_message("Ton ticket est vide.",ephemeral=True)
         await interaction.response.send_modal(UniversalStakeModal(self.service))
 
+def _ticket_draft_embed(user_id: int) -> discord.Embed:
+    draft = _draft_for(user_id)
+    if not draft:
+        return discord.Embed(title="🎟️ MON TICKET", description="Ton ticket est vide.", color=ODDIUM_MUTED)
+    kind = "PARI SIMPLE" if len(draft) == 1 else f"COMBINÉ ×{len(draft)}"
+    lines = []
+    for leg in draft.values():
+        pick = {"HOME": leg["home_team"], "DRAW": "Nul", "AWAY": leg["away_team"]}[leg["selection"]]
+        lines.append(f"• **{leg['home_team']} — {leg['away_team']}** → {pick} `@{leg['odd']:.2f}`")
+    return discord.Embed(
+        title=f"🎟️ MON TICKET • {kind}",
+        description="\n".join(lines) + f"\n\n**Cote totale : {_draft_total(draft):.2f}**",
+        color=ODDIUM_GOLD,
+    )
+
+class UniversalTicketDraftView(discord.ui.View):
+    """Ticket séparé du MatchBoard V2 pour ne jamais dépasser la limite Discord de 40 composants."""
+    def __init__(self, service):
+        super().__init__(timeout=600)
+        self.add_item(UniversalValidateButton(service))
+        self.add_item(UniversalClearButton())
+
 class UniversalClearButton(discord.ui.Button):
     def __init__(self): super().__init__(label="Vider",emoji="🗑️",style=discord.ButtonStyle.danger)
     async def callback(self,interaction):
         UNIVERSAL_TICKETS.pop(int(interaction.user.id),None)
-        view=self.view
-        if isinstance(view,MatchBoardV2):
-            view.viewer_id=int(interaction.user.id); view.rebuild()
-        await interaction.response.edit_message(view=view)
+        await interaction.response.edit_message(embed=_ticket_draft_embed(interaction.user.id), view=None)
 
 class MatchOddV2Button(discord.ui.Button):
     def __init__(self, service: BettingService, match, selection: str, label: str, odd: float):
@@ -530,11 +549,14 @@ class MatchOddV2Button(discord.ui.Button):
         # Une autre cote du même match remplace automatiquement l'ancienne.
         draft[self.event_id]={"event_id":self.event_id,"selection":self.selection,"odd":self.odd,
                               "home_team":str(match["home_team"]),"away_team":str(match["away_team"])}
-        view=self.view
-        if isinstance(view,MatchBoardV2):
-            view.viewer_id=int(interaction.user.id)
-            view.rebuild()
-        await interaction.response.edit_message(view=view)
+        # IMPORTANT : ne jamais reconstruire le MatchBoard après un clic de cote.
+        # Avec 4 matchs + Components V2 + le ticket intégré, Discord dépassait 40 enfants
+        # et invalidait toute la vue. Le ticket est donc envoyé séparément en éphémère.
+        await interaction.response.send_message(
+            embed=_ticket_draft_embed(interaction.user.id),
+            view=UniversalTicketDraftView(self.service),
+            ephemeral=True,
+        )
 
 
 class MatchBoardDateButton(discord.ui.Button):
@@ -700,17 +722,8 @@ class MatchBoardV2(discord.ui.LayoutView):
             pages.add_item(MatchBoardPageButton(1, self.page >= self.page_count - 1))
             box.add_item(pages)
 
-        draft = _draft_for(getattr(self, "viewer_id", 0)) if getattr(self, "viewer_id", 0) else {}
-        # viewer_id is assigned on the first odds click; fallback summary is added by interaction rebuild.
-        if draft:
-            box.add_item(discord.ui.Separator())
-            kind = "PARI SIMPLE" if len(draft)==1 else f"COMBINÉ ×{len(draft)}"
-            lines=[]
-            for leg in draft.values():
-                pick={"HOME":leg["home_team"],"DRAW":"Nul","AWAY":leg["away_team"]}[leg["selection"]]
-                lines.append(f"• **{leg['home_team']} — {leg['away_team']}** → {pick} `@{leg['odd']:.2f}`")
-            box.add_item(discord.ui.TextDisplay(f"## 🎟️ MON TICKET • {kind}\n"+"\n".join(lines)+f"\n**Cote totale : {_draft_total(draft):.2f}**"))
-            actions=discord.ui.ActionRow(); actions.add_item(UniversalValidateButton(self.service)); actions.add_item(UniversalClearButton()); box.add_item(actions)
+        # V73 : le ticket universel est volontairement séparé du MatchBoard.
+        # Cela garde cette LayoutView sous la limite Discord de 40 composants.
         nav = discord.ui.ActionRow()
         nav.add_item(MatchBoardLeaguesButton())
         box.add_item(nav)
