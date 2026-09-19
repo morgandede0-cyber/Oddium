@@ -1803,11 +1803,6 @@ class MainPanelView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(label="Live", emoji="🔴", style=discord.ButtonStyle.danger, custom_id="oddium:v13:live", row=1)
-    async def live(self, interaction, button):
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        await open_private_page(interaction, embed=await _live_embed(self.service, wagered_only=True), view=LivePanelView(self.service, wagered_only=True), replace_existing=True)
-
     @discord.ui.button(label="Hall of Fame", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="oddium:v13:rank", row=1)
     async def rank(self, interaction, button):
         await interaction.response.defer(ephemeral=True, thinking=False)
